@@ -14,6 +14,7 @@ function App() {
   const [dragCounter, setDragCounter] = useState(0);
   const [transferRequest, setTransferRequest] = useState(null);
   const [receivingProgress, setReceivingProgress] = useState(null);
+  const [transferError, setTransferError] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -30,12 +31,19 @@ function App() {
       setReceivingProgress(data);
     });
 
+    socket.on("transfer-error", (data) => {
+      setTransferError(data);
+      setTimeout(() => setTransferError(null), 5000);
+    });
+
     return () => {
       socket.off("peers_list");
       socket.off("incoming-transfer-request");
       socket.off("transfer-progress");
+      socket.off("transfer-error");
     };
   }, []);
+
 
   const handleDecision = async (decision) => {
     if (!transferRequest) return;
@@ -185,6 +193,16 @@ function App() {
                 <button style={styles.rejectButton} onClick={() => handleDecision("reject")}>Reject</button>
                 <button style={styles.acceptButton} onClick={() => handleDecision("accept")}>Accept</button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {transferError && (
+          <div style={styles.errorToast}>
+            <span style={{fontSize: '20px', marginRight: '10px'}}>⚠️</span>
+            <div>
+              <div style={{fontWeight: 'bold', fontSize: '14px'}}>{transferError.code}</div>
+              <div style={{fontSize: '12px'}}>{transferError.message}</div>
             </div>
           </div>
         )}
@@ -671,6 +689,21 @@ const styles = {
     cursor: "pointer",
     transition: "all 0.2s ease",
   },
+  errorToast: {
+    position: "fixed",
+    top: "20px",
+    right: "20px",
+    background: "#fef2f2",
+    border: "1px solid #fecaca",
+    color: "#991b1b",
+    padding: "12px 20px",
+    borderRadius: "12px",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+    display: "flex",
+    alignItems: "center",
+    zIndex: 2000,
+    animation: "slideIn 0.3s ease-out",
+  },
   progressContainer: {
     background: "#fff",
     borderRadius: "20px",
@@ -722,6 +755,10 @@ const globalStyles = `
   @keyframes modalPop {
     from { transform: scale(0.9); opacity: 0; }
     to { transform: scale(1); opacity: 1; }
+  }
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
   }
   body { margin: 0; background: #fef7ee; }
   * { box-sizing: border-box; }

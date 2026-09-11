@@ -6,8 +6,8 @@ cd backend
 
 if [ ! -f core ] || [ ! -f sender ]; then
     echo "Compiling engines"
-    g++ -pthread core.cpp -o core
-    g++ sender.cpp -o sender
+    g++ -pthread core.cpp sha256.cpp -o core
+    g++ sender.cpp sha256.cpp -o sender
 fi
 
 if [ ! -d "node_modules" ]; then

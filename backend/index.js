@@ -80,6 +80,9 @@ coreEngine.stdout.on('data', (data) => {
                 const [id, currentChunk, totalChunks] = payload.split('|');
                 io.emit('transfer-progress', { id, currentChunk: parseInt(currentChunk), totalChunks: parseInt(totalChunks) });
             }
+        } else if (line.includes('ERROR:CHECKSUM_MISMATCH')) {
+            console.error("❌ Checksum mismatch detected by core engine");
+            io.emit('transfer-error', { code: 'CHECKSUM_MISMATCH', message: 'The received file is corrupted.' });
         } else if (line.trim().length > 0) {
             console.log(`⚙️ [C++] ${line.trim()}`);
         }

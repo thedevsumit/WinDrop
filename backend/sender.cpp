@@ -7,8 +7,11 @@
 #include <random>
 #include <algorithm>
 #include <vector>
+#include "sha256.h"
 
 using namespace std;
+
+const int CHUNK_SIZE = 1024;
 
 string generateRequestId() {
     const string charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -54,11 +57,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Handshake
-    string requestId = generateRequestId();
+    // Resume Support
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
+    string resume_query = "RESUME_QUERY:" + filename + "|" + to_string(fileSize) + "\n";
+    send(sock, resume_query.c_str(), resume_query.length(), 0);
 
+    char buffer[1024];
+    memset(buffer, 0, 1024);
+    int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    int lastChunk = 0;
+    if (bytes_received > 0) {
+        string response(buffer, bytes_received);
+        if (response.find("RESUME_RESPONSE:OK|") == 0) {
+            string chunk_str = response.substr(18);
+            lastChunk = stoi(chunk_str);
+            cout << "🔄 Resuming transfer from chunk " << lastChunk << endl;
+        } else {
+            cout << "🆕 Starting new transfer." << endl;
+        }
+    }
+
+    // Handshake
+    string requestId = generateRequestId();
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) != 0) strcpy(hostname, "Unknown_Peer");
     string senderName(hostname);
@@ -67,9 +88,8 @@ int main(int argc, char *argv[]) {
     send(sock, request.c_str(), request.length(), 0);
     cout << "📡 Handshake request sent (" << requestId << "). Waiting for acceptance..." << endl;
 
-    char buffer[1024];
     memset(buffer, 0, 1024);
-    int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
     if (bytes_received <= 0) {
         cerr << "❌ Connection lost during handshake." << endl;
         close(sock);
@@ -87,12 +107,39 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        char fileBuffer[4096];
-        while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0) {
-            send(sock, fileBuffer, infile.gcount(), 0);
+        if (lastChunk > 0) {
+            infile.seekg((long long)lastChunk * CHUNK_SIZE);
         }
 
-        cout << "SUCCESS: " << filename << " sent!" << endl;
+        char fileBuffer[4096];
+        while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0) {
+            int bytes_to_send = infile.gcount();
+            send(sock, fileBuffer, bytes_to_send, 0);
+            memset(buffer, 0, 1024);
+            recv(sock, buffer, sizeof(buffer), 0);
+        }
+
+        // Delivery Confirmation
+        string checksum = WinDrop::computeSHA256(file_path);
+        string complete_msg = "COMPLETE:" + checksum + "\n";
+        send(sock, complete_msg.c_str(), complete_msg.length(), 0);
+        cout << "🏁 File sent. Waiting for delivery confirmation..." << endl;
+
+        memset(buffer, 0, 1024);
+        bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_received > 0) {
+            string final_resp(buffer, bytes_received);
+            if (final_resp.find("DELIVERED_ACK") == 0) {
+                cout << "🌟 SUCCESS: File delivered and verified!" << endl;
+            } else if (final_resp.find("ERROR:CHECKSUM_MISMATCH") == 0) {
+                cerr << "❌ ERROR: Checksum mismatch on receiver side!" << endl;
+            } else {
+                cerr << "❌ Received unexpected response: " << final_resp << endl;
+            }
+        } else {
+            cerr << "❌ Connection lost while waiting for confirmation." << endl;
+        }
+
         infile.close();
     } else {
         cerr << "❌ Transfer rejected by receiver." << endl;

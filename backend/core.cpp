@@ -12,8 +12,11 @@
 #include <vector>
 #include <ifaddrs.h>
 #include <netdb.h>
+#include "sha256.h"
 
 using namespace std;
+
+const int CHUNK_SIZE = 1024;
 
 struct RequestState {
     int socket;
@@ -102,6 +105,21 @@ void run_udp_listener() {
     close(sock);
 }
 
+void save_metadata(const string& filename, long long totalSize, int lastChunk) {
+    ofstream meta(filename + ".part.meta");
+    meta << totalSize << "\n" << CHUNK_SIZE << "\n" << lastChunk << "\n";
+    meta.close();
+}
+
+int read_metadata(const string& filename, long long& totalSize) {
+    ifstream meta(filename + ".part.meta");
+    if (!meta) return -1;
+    int lastChunk;
+    int chunkSize;
+    if (!(meta >> totalSize >> chunkSize >> lastChunk)) return -1;
+    return lastChunk;
+}
+
 void run_stdin_listener() {
     string line;
     while (getline(cin, line)) {
@@ -136,6 +154,34 @@ void handle_client(int new_socket) {
     }
 
     string raw_data(buffer, bytes_read);
+
+    // Handle Resume Query
+    if (raw_data.find("RESUME_QUERY:") == 0) {
+        string payload = raw_data.substr(13);
+        size_t pos = payload.find('|');
+        if (pos != string::npos) {
+            string filename = payload.substr(0, pos);
+            long long size = stoll(payload.substr(pos + 1));
+            long long metaSize;
+            int lastChunk = read_metadata(filename, metaSize);
+            if (lastChunk != -1 && metaSize == size) {
+                string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
+                send(new_socket, resp.c_str(), resp.length(), 0);
+            } else if (lastChunk != -1 && metaSize != size) {
+                cout << "ERROR:RESUME_STATE_INVALID" << endl;
+                string resp = "RESUME_RESPONSE:NO\n";
+                send(new_socket, resp.c_str(), resp.length(), 0);
+            } else {
+                string resp = "RESUME_RESPONSE:NO\n";
+                send(new_socket, resp.c_str(), resp.length(), 0);
+            }
+        }
+        memset(buffer, 0, 1024);
+        bytes_read = recv(new_socket, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read <= 0) { close(new_socket); return; }
+        raw_data = string(buffer, bytes_read);
+    }
+
     if (raw_data.find("REQUEST:") == 0) {
         string payload = raw_data.substr(8);
         size_t pos = 0;
@@ -179,29 +225,75 @@ void handle_client(int new_socket) {
             string resp = "REQUEST_ACCEPT:" + id + "\n";
             send(new_socket, resp.c_str(), resp.length(), 0);
 
-            memset(buffer, 0, 1024);
-            ofstream outfile(filename, ios::binary);
-
             long long total_size = state->size;
-            int chunk_size = 1024;
-            long long total_chunks = (total_size + chunk_size - 1) / chunk_size;
             int chunks_received = 0;
+            string part_filename = filename + ".part";
+
+            long long metaSize;
+            int lastChunk = read_metadata(filename, metaSize);
+            if (lastChunk != -1 && metaSize == total_size) {
+                chunks_received = lastChunk;
+                cout << "🔄 Resuming transfer from chunk " << chunks_received << endl;
+            }
+
+            memset(buffer, 0, 1024);
+            ofstream outfile(part_filename, ios::binary | ios::app);
+
+            vector<char> write_buffer;
+            const size_t FLUSH_THRESHOLD = 16 * CHUNK_SIZE;
 
             while ((bytes_read = recv(new_socket, buffer, sizeof(buffer), 0)) > 0) {
-                outfile.write(buffer, bytes_read);
+                if (bytes_read < 1024 && string(buffer, bytes_read).find("COMPLETE:") == 0) {
+                    string complete_msg = string(buffer, bytes_read);
+                    string sender_checksum = complete_msg.substr(9);
+                    if (!sender_checksum.empty() && sender_checksum.back() == '\n') sender_checksum.pop_back();
+                    if (!sender_checksum.empty() && sender_checksum.back() == '\r') sender_checksum.pop_back();
+
+                    if (!write_buffer.empty()) {
+                        outfile.write(write_buffer.data(), write_buffer.size());
+                        chunks_received += write_buffer.size() / CHUNK_SIZE;
+                        save_metadata(filename, total_size, chunks_received);
+                        write_buffer.clear();
+                    }
+
+                    outfile.close();
+
+                    string local_checksum = WinDrop::computeSHA256(part_filename);
+                    if (local_checksum == sender_checksum) {
+                        if (rename(part_filename.c_str(), filename.c_str()) == 0) {
+                            cout << "✅ File Verified and Saved: " << filename << endl;
+                            string meta_file = filename + ".part.meta";
+                            remove(meta_file.c_str());
+                            send(new_socket, "DELIVERED_ACK\n", 14, 0);
+                        } else {
+                            send(new_socket, "ERROR:DISK_FULL\n", 16, 0);
+                        }
+                    } else {
+                        cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
+                        cout << "ERROR:CHECKSUM_MISMATCH" << endl;
+                        send(new_socket, "ERROR:CHECKSUM_MISMATCH\n", 24, 0);
+                    }
+                    bytes_read = -1;
+                    break;
+                }
+
+                write_buffer.insert(write_buffer.end(), buffer, buffer + bytes_read);
                 chunks_received++;
 
-                // Send ACK back to sender
                 string ack = "ACK:" + to_string(chunks_received) + "\n";
                 send(new_socket, ack.c_str(), ack.length(), 0);
 
-                // Notify backend of progress
-                cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << total_chunks << endl;
-            }
-            outfile.close();
-            cout << "✅ File Saved: " << filename << endl;
-        } else {
+                if (write_buffer.size() >= FLUSH_THRESHOLD) {
+                    outfile.write(write_buffer.data(), write_buffer.size());
+                    save_metadata(filename, total_size, chunks_received);
+                    write_buffer.clear();
+                    cout << "💾 Flushed buffer to disk at chunk " << chunks_received << endl;
+                }
 
+                cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
+            }
+            if (outfile.is_open()) outfile.close();
+        } else {
             string resp = "REQUEST_REJECT:" + id + "\n";
             send(new_socket, resp.c_str(), resp.length(), 0);
         }
