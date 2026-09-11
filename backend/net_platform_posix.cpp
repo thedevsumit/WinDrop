@@ -3,7 +3,7 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <cstring>
-
+#include <net/if.h>
 namespace Net {
     socket_t createSocket(int type) {
         return socket(AF_INET, type, 0);

@@ -9,7 +9,9 @@ const fs = require('fs');
 const app = express();
 const os = require('os');
 const HISTORY_FILE = './transfers.json';
-
+const isWin = os.platform() === 'win32';
+const coreCommand = isWin ? './core.exe' : './core';
+const senderCommand = isWin ? './sender.exe' : './sender';
 // Helper to load transfer history
 function loadHistory() {
     if (!fs.existsSync(HISTORY_FILE)) return [];
@@ -65,7 +67,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // --- SPAWN CORE ENGINE ---
-const coreEngine = spawn('./core');
+const coreEngine = spawn(coreCommand);  
 
 coreEngine.stdout.on('data', (data) => {
     const lines = data.toString().trim().split('\n');
@@ -110,6 +112,12 @@ coreEngine.stdout.on('data', (data) => {
         }
     });
 });
+
+coreEngine.on('error', (err) => {
+    console.error('❌ Failed to start C++ Core Engine. Did you compile it?', err.message);
+});
+
+// Add this right after spawning the sender in the /send route:
 
 // --- TRANSFER DECISION ROUTE ---
 app.post('/transfer/decision', (req, res) => {
@@ -156,8 +164,12 @@ app.post('/send', upload.single('file'), (req, res) => {
 
     console.log(`🚀 Starting async send: ${filename} → ${targetIp} [ID: ${transferId}]`);
 
-    const sender = spawn('./sender', [targetIp, filePath]);
+    const sender = spawn(senderCommand, [targetIp, filePath]);
     activeTransfers.set(transferId, { process: sender, filename, targetIp });
+    sender.on('error', (err) => {
+    console.error(`❌ Failed to start C++ Sender for ${transferId}.`, err.message);
+    activeTransfers.delete(transferId);
+});
 
     sender.stdout.on("data", (data) => {
         const output = data.toString();
@@ -170,7 +182,7 @@ app.post('/send', upload.single('file'), (req, res) => {
                     const [sId, current, total] = parts;
                     const progress = Math.round((parseInt(current) / parseInt(total)) * 100);
                     io.emit('sending-progress', {
-                        transferId: sId,
+                        transferId: transferId,
                         filename,
                         progress,
                         status: 'sending'

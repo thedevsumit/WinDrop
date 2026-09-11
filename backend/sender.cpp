@@ -9,7 +9,6 @@
 
 using namespace std;
 
-using namespace std;
 
 const int CHUNK_SIZE = 1024;
 
@@ -63,7 +62,6 @@ int main(int argc, char *argv[]) {
     long long fileSize = getFileSize(file_path);
     string resume_query = "RESUME_QUERY:" + filename + "|" + to_string(fileSize) + "\n";
     Net::sendData(sock, resume_query.c_str(), resume_query.length());
-
     char buffer[1024];
     memset(buffer, 0, 1024);
     int bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
@@ -112,7 +110,7 @@ int main(int argc, char *argv[]) {
             infile.seekg((long long)lastChunk * CHUNK_SIZE);
         }
 
-        char fileBuffer[4096];
+        char fileBuffer[CHUNK_SIZE];
         int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
         int currentChunk = lastChunk;
 
@@ -121,7 +119,7 @@ int main(int argc, char *argv[]) {
             Net::sendData(sock, fileBuffer, bytes_to_send);
 
             memset(buffer, 0, 1024);
-            int ack_bytes = Net::recvData(sock, buffer, sizeof(buffer), 0);
+            int ack_bytes = Net::recvData(sock, buffer, sizeof(buffer) - 1);
 
             if (ack_bytes > 0) {
                 currentChunk += (bytes_to_send + CHUNK_SIZE - 1) / CHUNK_SIZE;

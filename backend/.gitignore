@@ -1,1 +1,9 @@
 /node_modules/
+core
+sender
+*.exe
+*.part
+*.meta
+*.txt
+uploads/
+transfers.json

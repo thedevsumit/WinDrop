@@ -6,8 +6,13 @@ cd backend
 
 if [ ! -f core ] || [ ! -f sender ]; then
     echo "Compiling engines"
-    g++ -pthread core.cpp sha256.cpp -o core
-    g++ sender.cpp sha256.cpp -o sender
+    if [ "$(uname)" = "Linux" ] || [ "$(uname)" = "Darwin" ]; then
+        PLATFORM_FILE="net_platform_posix.cpp"
+    else
+        PLATFORM_FILE="net_platform_win.cpp"
+    fi
+    g++ -pthread core.cpp sha256.cpp "$PLATFORM_FILE" -o core || { echo "Compilation of core failed"; exit 1; }
+    g++ sender.cpp sha256.cpp "$PLATFORM_FILE" -o sender || { echo "Compilation of sender failed"; exit 1; }
 fi
 
 if [ ! -d "node_modules" ]; then
