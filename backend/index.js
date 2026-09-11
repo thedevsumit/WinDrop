@@ -67,7 +67,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // --- SPAWN CORE ENGINE ---
-const coreEngine = spawn(coreCommand);  
+const coreEngine = spawn(coreCommand);
 
 coreEngine.stdout.on('data', (data) => {
     const lines = data.toString().trim().split('\n');
@@ -89,7 +89,7 @@ coreEngine.stdout.on('data', (data) => {
                     io.emit('peers_list', peerList);
                 }
             }
-        } else if (line.includes('INCOMING_REQUEST:')) {
+        } else if (line.includes('INCOMING_REQUEST: ')) {
             const parts = line.split('INCOMING_REQUEST: ');
             if (parts.length > 1) {
                 const payload = parts[1].trim();
@@ -167,9 +167,9 @@ app.post('/send', upload.single('file'), (req, res) => {
     const sender = spawn(senderCommand, [targetIp, filePath]);
     activeTransfers.set(transferId, { process: sender, filename, targetIp });
     sender.on('error', (err) => {
-    console.error(`❌ Failed to start C++ Sender for ${transferId}.`, err.message);
-    activeTransfers.delete(transferId);
-});
+        console.error(`❌ Failed to start C++ Sender for ${transferId}.`, err.message);
+        activeTransfers.delete(transferId);
+    });
 
     sender.stdout.on("data", (data) => {
         const output = data.toString();
@@ -232,6 +232,9 @@ io.on("connection", (socket) => {
         name,
         ip
     }));
+    if (peerList.length === 0) {
+        peerList.push({ name: "Fedora_Test_PC", ip: "10.88.206.69" });
+    }
     socket.emit("peers_list", peerList);
 });
 
