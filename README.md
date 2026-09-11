@@ -211,6 +211,33 @@ The startup script handles:
 | `REQUEST_REJECT:id` | Receiver $\rightarrow$ Sender | Denies the transfer |
 
 
+## Transfer Protocol Specification
+
+The WinDrop protocol ensures a secure, verifiable, and resumable transfer process.
+
+### 1. Discovery (UDP)
+Peers broadcast their presence every 2 seconds:
+- **Message**: `[Hostname]:[IP] Alive`
+- **Port**: `8888` (UDP Multicast `239.255.255.250`)
+
+### 2. Handshake (TCP)
+Before any data is sent, a handshake occurs:
+1. **Resume Query**: Sender sends `RESUME_QUERY:[filename]|[size]`.
+2. **Resume Response**: Receiver responds `RESUME_RESPONSE:OK|[chunk]` or `RESUME_RESPONSE:NO`.
+3. **Request**: Sender sends `REQUEST:[id]|[filename]|[size]|[sender_name]`.
+4. **Decision**: Receiver sends `REQUEST_ACCEPT:[id]` or `REQUEST_REJECT:[id]`.
+
+### 3. Transmission (TCP)
+Once accepted:
+- **Data**: Sender streams chunks of 1KB.
+- **Acknowledgment**: Receiver sends `ACK:[chunk_number]` after every chunk.
+- **Progress**: C++ Core emits `TRANSFER_PROGRESS:[id]|[current]|[total]` to the backend.
+
+### 4. Finalization (TCP)
+1. **Completion**: Sender sends `COMPLETE:[sha256_hash]`.
+2. **Verification**: Receiver computes local hash and compares.
+3. **Confirmation**: Receiver sends `DELIVERED_ACK` or `ERROR:CHECKSUM_MISMATCH`.
+
 ---
 
 ## Development
