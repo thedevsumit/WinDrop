@@ -181,12 +181,27 @@ void handle_client(int new_socket) {
 
             memset(buffer, 0, 1024);
             ofstream outfile(filename, ios::binary);
+
+            long long total_size = state->size;
+            int chunk_size = 1024;
+            long long total_chunks = (total_size + chunk_size - 1) / chunk_size;
+            int chunks_received = 0;
+
             while ((bytes_read = recv(new_socket, buffer, sizeof(buffer), 0)) > 0) {
                 outfile.write(buffer, bytes_read);
+                chunks_received++;
+
+                // Send ACK back to sender
+                string ack = "ACK:" + to_string(chunks_received) + "\n";
+                send(new_socket, ack.c_str(), ack.length(), 0);
+
+                // Notify backend of progress
+                cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << total_chunks << endl;
             }
             outfile.close();
             cout << "✅ File Saved: " << filename << endl;
         } else {
+
             string resp = "REQUEST_REJECT:" + id + "\n";
             send(new_socket, resp.c_str(), resp.length(), 0);
         }

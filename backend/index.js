@@ -73,6 +73,13 @@ coreEngine.stdout.on('data', (data) => {
                 console.log(`🔔 Transfer Request: ${sender} wants to send ${filename} (${size} bytes) [ID: ${id}]`);
                 io.emit('incoming-transfer-request', { id, filename, size, sender });
             }
+        } else if (line.includes('TRANSFER_PROGRESS:')) {
+            const parts = line.split('TRANSFER_PROGRESS: ');
+            if (parts.length > 1) {
+                const payload = parts[1].trim();
+                const [id, currentChunk, totalChunks] = payload.split('|');
+                io.emit('transfer-progress', { id, currentChunk: parseInt(currentChunk), totalChunks: parseInt(totalChunks) });
+            }
         } else if (line.trim().length > 0) {
             console.log(`⚙️ [C++] ${line.trim()}`);
         }

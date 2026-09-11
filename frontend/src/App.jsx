@@ -13,6 +13,7 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [dragCounter, setDragCounter] = useState(0);
   const [transferRequest, setTransferRequest] = useState(null);
+  const [receivingProgress, setReceivingProgress] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -25,9 +26,14 @@ function App() {
       setTransferRequest(data);
     });
 
+    socket.on("transfer-progress", (data) => {
+      setReceivingProgress(data);
+    });
+
     return () => {
       socket.off("peers_list");
       socket.off("incoming-transfer-request");
+      socket.off("transfer-progress");
     };
   }, []);
 
@@ -179,6 +185,28 @@ function App() {
                 <button style={styles.rejectButton} onClick={() => handleDecision("reject")}>Reject</button>
                 <button style={styles.acceptButton} onClick={() => handleDecision("accept")}>Accept</button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {receivingProgress && (
+          <div style={styles.progressContainer}>
+            <div style={styles.progressHeader}>
+              <span style={styles.progressTitle}>Receiving File...</span>
+              <span style={styles.progressPercent}>
+                {Math.round((receivingProgress.currentChunk / receivingProgress.totalChunks) * 100)}%
+              </span>
+            </div>
+            <div style={styles.progressBarBg}>
+              <div
+                style={{
+                  ...styles.progressBarFill,
+                  width: `${(receivingProgress.currentChunk / receivingProgress.totalChunks) * 100}%`
+                }}
+              />
+            </div>
+            <div style={styles.progressDetails}>
+              <span>Chunks: {receivingProgress.currentChunk} / {receivingProgress.totalChunks}</span>
             </div>
           </div>
         )}
@@ -642,6 +670,47 @@ const styles = {
     fontWeight: "600",
     cursor: "pointer",
     transition: "all 0.2s ease",
+  },
+  progressContainer: {
+    background: "#fff",
+    borderRadius: "20px",
+    padding: "16px",
+    marginBottom: "20px",
+    border: "1px solid #f0f0f0",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+  },
+  progressHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "8px",
+  },
+  progressTitle: {
+    fontSize: "14px",
+    fontWeight: "600",
+    color: "#1a1a1a",
+  },
+  progressPercent: {
+    fontSize: "14px",
+    fontWeight: "700",
+    color: "#f97316",
+  },
+  progressBarBg: {
+    height: "8px",
+    background: "#f0f0f0",
+    borderRadius: "4px",
+    overflow: "hidden",
+    marginBottom: "8px",
+  },
+  progressBarFill: {
+    height: "100%",
+    background: "linear-gradient(90deg, #f97316, #ea580c)",
+    transition: "width 0.3s ease",
+  },
+  progressDetails: {
+    fontSize: "12px",
+    color: "#737373",
+    textAlign: "center",
   },
 };
 
