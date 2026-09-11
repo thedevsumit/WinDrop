@@ -183,26 +183,33 @@ The startup script handles:
 ## How It Works
 
 ```text
-1. User selects a file
+1. Sender sends a Handshake Request (ID, Filename, Size, Sender Name)
         │
         ▼
-2. Sharing session is initialized
+2. Receiver Core forwards request to Node.js Backend
         │
         ▼
-3. Peer discovery begins
+3. User sees "Incoming Transfer" modal in React UI
         │
         ▼
-4. Connection details are exchanged
+4. User clicks "Accept" or "Reject"
         │
         ▼
-5. Direct socket connection is established
+5. Decision travels: UI → Backend → Core → Sender
         │
         ▼
-6. File is transmitted between peers
-        │
-        ▼
-7. Receiver reconstructs the file
+6. If Accepted: Direct socket connection established & file streamed
+7. If Rejected: Connection closed, sender notified
 ```
+
+### Transfer Protocol
+| Message | Direction | Description |
+|---|---|---|
+| `REQUEST:id\|file\|size\|name` | Sender $\rightarrow$ Receiver | Initiates a transfer request |
+| `INCOMING_REQUEST:...` | Core $\rightarrow$ Node | Notifies backend of a request |
+| `REQUEST_ACCEPT:id` | Receiver $\rightarrow$ Sender | Approves the transfer |
+| `REQUEST_REJECT:id` | Receiver $\rightarrow$ Sender | Denies the transfer |
+
 
 ---
 

@@ -49,39 +49,45 @@ coreEngine.stdout.on('data', (data) => {
     const lines = data.toString().trim().split('\n');
 
     lines.forEach(line => {
-
         if (line.includes('Founded Peer:')) {
             const parts = line.split('Founded Peer: ');
-
             if (parts.length > 1) {
                 const raw = parts[1].replace(' Alive', '').trim();
-
                 if (raw.includes(':')) {
                     const [name, ip] = raw.split(':');
-
-                    // 🔥 IGNORE INVALID / LOCALHOST
-                    // 🔥 IGNORE INVALID, LOCALHOST, AND MYSELF
-if (!ip || ip === "127.0.0.1" || myIps.includes(ip)) return;
-
-                    // 🔥 STORE UNIQUE
+                    if (!ip || ip === "127.0.0.1" || myIps.includes(ip)) return;
                     peers.set(ip, name);
-
                     const peerList = Array.from(peers.entries()).map(([ip, name]) => ({
                         name,
                         ip
                     }));
-
                     console.log("🟢 Active Devices:", peerList);
-
-                    // 🔥 SEND FULL LIST
                     io.emit('peers_list', peerList);
                 }
             }
-
+        } else if (line.includes('INCOMING_REQUEST:')) {
+            const parts = line.split('INCOMING_REQUEST: ');
+            if (parts.length > 1) {
+                const payload = parts[1].trim();
+                const [id, filename, size, sender] = payload.split('|');
+                console.log(`🔔 Transfer Request: ${sender} wants to send ${filename} (${size} bytes) [ID: ${id}]`);
+                io.emit('incoming-transfer-request', { id, filename, size, sender });
+            }
         } else if (line.trim().length > 0) {
             console.log(`⚙️ [C++] ${line.trim()}`);
         }
     });
+});
+
+// --- TRANSFER DECISION ROUTE ---
+app.post('/transfer/decision', (req, res) => {
+    const { id, decision } = req.body;
+    if (!id || !decision) return res.status(400).json({ error: "id and decision required" });
+
+    const command = decision === 'accept' ? `REQUEST_ACCEPT:${id}\n` : `REQUEST_REJECT:${id}\n`;
+    console.log(`⚖️ Decision for ${id}: ${decision}`);
+    coreEngine.stdin.write(command);
+    res.json({ success: true });
 });
 
 // --- FILE UPLOAD & SEND ROUTE ---
@@ -95,7 +101,6 @@ app.post('/send', upload.single('file'), (req, res) => {
 
     console.log(`🚀 Sending ${req.file.originalname} → ${targetIp}`);
 
-    // 🔥 USE REAL TARGET IP (NOT HARDCODED)
     const sender = spawn('./sender', [targetIp, filePath]);
 
     sender.stdout.on("data", (data) => {
@@ -108,11 +113,9 @@ app.post('/send', upload.single('file'), (req, res) => {
 
     sender.on('close', (code) => {
         console.log(`🏁 Sender finished (Code: ${code})`);
-
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
-
         res.json({ success: code === 0 });
     });
 });
@@ -120,13 +123,10 @@ app.post('/send', upload.single('file'), (req, res) => {
 // --- SOCKET CONNECTION ---
 io.on("connection", (socket) => {
     console.log("🔌 Client connected");
-
-    // send current list immediately
     const peerList = Array.from(peers.entries()).map(([ip, name]) => ({
         name,
         ip
     }));
-
     socket.emit("peers_list", peerList);
 });
 

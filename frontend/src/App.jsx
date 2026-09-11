@@ -12,6 +12,7 @@ function App() {
   const [sendStatus, setSendStatus] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragCounter, setDragCounter] = useState(0);
+  const [transferRequest, setTransferRequest] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -20,10 +21,28 @@ function App() {
       setIsSearching(false);
     });
 
+    socket.on("incoming-transfer-request", (data) => {
+      setTransferRequest(data);
+    });
+
     return () => {
       socket.off("peers_list");
+      socket.off("incoming-transfer-request");
     };
   }, []);
+
+  const handleDecision = async (decision) => {
+    if (!transferRequest) return;
+    try {
+      await axios.post(`http://${window.location.hostname}:5000/transfer/decision`, {
+        id: transferRequest.id,
+        decision: decision,
+      });
+    } catch (err) {
+      console.error("Decision failed", err);
+    }
+    setTransferRequest(null);
+  };
 
   const handleDragEnter = useCallback((e) => {
     e.preventDefault();
@@ -134,6 +153,35 @@ function App() {
             )}
           </div>
         </div>
+
+        {transferRequest && (
+          <div style={styles.modalOverlay}>
+            <div style={styles.modal}>
+              <div style={styles.modalHeader}>
+                <div style={styles.modalIcon}>📦</div>
+                <h2 style={styles.modalTitle}>Incoming File</h2>
+              </div>
+              <div style={styles.modalBody}>
+                <div style={styles.modalRow}>
+                  <span style={styles.modalLabel}>Sender:</span>
+                  <span style={styles.modalValue}>{transferRequest.sender}</span>
+                </div>
+                <div style={styles.modalRow}>
+                  <span style={styles.modalLabel}>File:</span>
+                  <span style={styles.modalValue}>{transferRequest.filename}</span>
+                </div>
+                <div style={styles.modalRow}>
+                  <span style={styles.modalLabel}>Size:</span>
+                  <span style={styles.modalValue}>{(transferRequest.size / 1024 / 1024).toFixed(2)} MB</span>
+                </div>
+              </div>
+              <div style={styles.modalFooter}>
+                <button style={styles.rejectButton} onClick={() => handleDecision("reject")}>Reject</button>
+                <button style={styles.acceptButton} onClick={() => handleDecision("accept")}>Accept</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={styles.statusBar}>
           {isSearching && (
@@ -508,12 +556,103 @@ const styles = {
     opacity: 0.5,
     cursor: "not-allowed",
   },
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: "rgba(0, 0, 0, 0.4)",
+    backdropFilter: "blur(4px)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  modal: {
+    background: "#fff",
+    width: "320px",
+    borderRadius: "24px",
+    padding: "24px",
+    boxShadow: "0 20px 40px rgba(0, 0, 0, 0.2)",
+    animation: "modalPop 0.3s ease-out",
+  },
+  modalHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    marginBottom: "20px",
+  },
+  modalIcon: {
+    width: "40px",
+    height: "400px",
+    background: "#fff7ed",
+    borderRadius: "10px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "20px",
+  },
+  modalTitle: {
+    fontSize: "20px",
+    fontWeight: "700",
+    margin: 0,
+    color: "#1a1a1a",
+  },
+  modalBody: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+    marginBottom: "24px",
+  },
+  modalRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: "14px",
+  },
+  modalLabel: {
+    color: "#737373",
+  },
+  modalValue: {
+    fontWeight: "600",
+    color: "#1a1a1a",
+  },
+  modalFooter: {
+    display: "flex",
+    gap: "12px",
+  },
+  rejectButton: {
+    flex: 1,
+    padding: "12px",
+    borderRadius: "12px",
+    border: "1px solid #e5e5e5",
+    background: "#fff",
+    color: "#737373",
+    fontWeight: "600",
+    cursor: "pointer",
+    transition: "all 0.2s ease",
+  },
+  acceptButton: {
+    flex: 1,
+    padding: "12px",
+    borderRadius: "12px",
+    border: "none",
+    background: "linear-gradient(135deg, #f97316 0%, #ea580c 100%)",
+    color: "#fff",
+    fontWeight: "600",
+    cursor: "pointer",
+    transition: "all 0.2s ease",
+  },
 };
 
 const globalStyles = `
   @keyframes searchPulse {
     0%, 100% { transform: scale(1); opacity: 1; }
     50% { transform: scale(1.15); opacity: 0.7; }
+  }
+  @keyframes modalPop {
+    from { transform: scale(0.9); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
   }
   body { margin: 0; background: #fef7ee; }
   * { box-sizing: border-box; }
