@@ -68,9 +68,9 @@ The web layer provides an accessible interface for managing file-sharing session
 
 The system separates responsibilities into three layers:
 
-- **Frontend** — manages user interaction and file-sharing workflows
-- **Backend** — handles application coordination and communication with native processes
-- **C++ Core** — manages peer discovery and direct socket-based transmission
+- **Frontend** — manages user interaction, real-time progress bars for multiple concurrent transfers, and transfer history.
+- **Backend** — handles asynchronous coordination, mapping native process events to Socket.IO streams.
+- **C++ Core** — uses a Platform Abstraction Layer (PAL) to ensure cross-OS compatibility (Windows/Linux) for low-level socket operations.
 
 ---
 

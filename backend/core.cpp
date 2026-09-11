@@ -1,18 +1,16 @@
 #include <iostream>
 #include <fstream>
 #include <thread>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <condition_variable>
 #include <sstream>
 #include <vector>
-#include <ifaddrs.h>
-#include <netdb.h>
 #include "sha256.h"
+#include "net_platform.h"
+
+using namespace std;
 
 using namespace std;
 
@@ -34,33 +32,12 @@ map<string, shared_ptr<RequestState>> pending_requests;
 mutex requests_mutex;
 
 string getLocalIP() {
-    char buffer[256];
-    string best_ip = "127.0.0.1";
-    FILE *pipe = popen("ipconfig.exe", "r");
-    if (!pipe) return best_ip;
-    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        string line = buffer;
-        if (line.find("IPv4") != string::npos) {
-            size_t colon_pos = line.find(":");
-            if (colon_pos != string::npos) {
-                string ip = line.substr(colon_pos + 1);
-                ip.erase(ip.find_last_not_of(" \n\r\t") + 1);
-                ip.erase(0, ip.find_first_not_of(" \n\r\t"));
-                if (ip.find("172.") != 0 && ip.find("169.254.") != 0 && ip != "127.0.0.1") {
-                    best_ip = ip;
-                    if (best_ip.find("10.") == 0 || best_ip.find("192.168.") == 0) break;
-                }
-            }
-        }
-    }
-    pclose(pipe);
-    return best_ip;
+    return Net::getLocalIP();
 }
 
 void run_udp_broadcaster() {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    int broadcast_enable = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
+    socket_t sock = Net::createSocket(SOCK_DGRAM);
+    Net::enableBroadcast(sock);
     struct sockaddr_in broadcast_addr;
     broadcast_addr.sin_family = AF_INET;
     broadcast_addr.sin_port = htons(8888);
@@ -71,38 +48,35 @@ void run_udp_broadcaster() {
     string name(hostname);
     string message = name + ":" + ip + " Alive";
     while (true) {
-        sendto(sock, message.c_str(), message.length(), 0, (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr));
+        Net::sendData(sock, message.c_str(), message.length());
         sleep(2);
     }
-    close(sock);
+    Net::closeSocket(sock);
 }
 
 void run_udp_listener() {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    socket_t sock = Net::createSocket(SOCK_DGRAM);
+    Net::setReuseAddr(sock);
     struct sockaddr_in listen_addr;
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(8888);
     listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr));
-    struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = inet_addr("239.255.255.250");
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+    Net::joinMulticastGroup(sock, "239.255.255.250");
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) != 0) strcpy(hostname, "Unknown_Peer");
     string my_name(hostname);
     char buffer[1024];
     while (true) {
         memset(buffer, 0, 1024);
-        recvfrom(sock, buffer, sizeof(buffer), 0, nullptr, nullptr);
-        string received_msg(buffer);
+        int bytes = Net::recvData(sock, buffer, sizeof(buffer) - 1);
+        if (bytes <= 0) continue;
+        string received_msg(buffer, bytes);
         if (received_msg.find(my_name) == string::npos) {
             cout << "Founded Peer: " << buffer << "\n";
         }
     }
-    close(sock);
+    Net::closeSocket(sock);
 }
 
 void save_metadata(const string& filename, long long totalSize, int lastChunk) {
@@ -145,11 +119,12 @@ void run_stdin_listener() {
 }
 
 void handle_client(int new_socket) {
+    socket_t sock = (socket_t)new_socket;
     char buffer[1024];
     memset(buffer, 0, 1024);
-    int bytes_read = recv(new_socket, buffer, sizeof(buffer) - 1, 0);
+    int bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
     if (bytes_read <= 0) {
-        close(new_socket);
+        Net::closeSocket(sock);
         return;
     }
 
@@ -166,19 +141,19 @@ void handle_client(int new_socket) {
             int lastChunk = read_metadata(filename, metaSize);
             if (lastChunk != -1 && metaSize == size) {
                 string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
-                send(new_socket, resp.c_str(), resp.length(), 0);
+                Net::sendData(sock, resp.c_str(), resp.length());
             } else if (lastChunk != -1 && metaSize != size) {
                 cout << "ERROR:RESUME_STATE_INVALID" << endl;
                 string resp = "RESUME_RESPONSE:NO\n";
-                send(new_socket, resp.c_str(), resp.length(), 0);
+                Net::sendData(sock, resp.c_str(), resp.length());
             } else {
                 string resp = "RESUME_RESPONSE:NO\n";
-                send(new_socket, resp.c_str(), resp.length(), 0);
+                Net::sendData(sock, resp.c_str(), resp.length());
             }
         }
         memset(buffer, 0, 1024);
-        bytes_read = recv(new_socket, buffer, sizeof(buffer) - 1, 0);
-        if (bytes_read <= 0) { close(new_socket); return; }
+        bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
+        if (bytes_read <= 0) { Net::closeSocket(sock); return; }
         raw_data = string(buffer, bytes_read);
     }
 
@@ -193,7 +168,7 @@ void handle_client(int new_socket) {
         parts.push_back(payload);
 
         if (parts.size() < 4) {
-            close(new_socket);
+            Net::closeSocket(sock);
             return;
         }
 
@@ -207,7 +182,7 @@ void handle_client(int new_socket) {
         cout << "INCOMING_REQUEST:" << id << "|" << filename << "|" << size_str << "|" << sender << endl;
 
         auto state = make_shared<RequestState>();
-        state->socket = new_socket;
+        state->socket = (int)sock;
         state->id = id;
         state->filename = filename;
         state->sender = sender;
@@ -223,7 +198,7 @@ void handle_client(int new_socket) {
 
         if (state->accepted) {
             string resp = "REQUEST_ACCEPT:" + id + "\n";
-            send(new_socket, resp.c_str(), resp.length(), 0);
+            Net::sendData(sock, resp.c_str(), resp.length());
 
             long long total_size = state->size;
             int chunks_received = 0;
@@ -238,11 +213,18 @@ void handle_client(int new_socket) {
 
             memset(buffer, 0, 1024);
             ofstream outfile(part_filename, ios::binary | ios::app);
+            if (!outfile) {
+                cout << "ERROR:PERMISSION_DENIED|" << id << endl;
+                string err = "ERROR:PERMISSION_DENIED\n";
+                Net::sendData(sock, err.c_str(), err.length());
+                Net::closeSocket(sock);
+                return;
+            }
 
             vector<char> write_buffer;
             const size_t FLUSH_THRESHOLD = 16 * CHUNK_SIZE;
 
-            while ((bytes_read = recv(new_socket, buffer, sizeof(buffer), 0)) > 0) {
+            while ((bytes_read = Net::recvData(sock, buffer, sizeof(buffer))) > 0) {
                 if (bytes_read < 1024 && string(buffer, bytes_read).find("COMPLETE:") == 0) {
                     string complete_msg = string(buffer, bytes_read);
                     string sender_checksum = complete_msg.substr(9);
@@ -264,14 +246,14 @@ void handle_client(int new_socket) {
                             cout << "✅ File Verified and Saved: " << filename << endl;
                             string meta_file = filename + ".part.meta";
                             remove(meta_file.c_str());
-                            send(new_socket, "DELIVERED_ACK\n", 14, 0);
+                            Net::sendData(sock, "DELIVERED_ACK\n", 14);
                         } else {
-                            send(new_socket, "ERROR:DISK_FULL\n", 16, 0);
+                            Net::sendData(sock, "ERROR:DISK_FULL\n", 16);
                         }
                     } else {
                         cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
                         cout << "ERROR:CHECKSUM_MISMATCH" << endl;
-                        send(new_socket, "ERROR:CHECKSUM_MISMATCH\n", 24, 0);
+                        Net::sendData(sock, "ERROR:CHECKSUM_MISMATCH\n", 24);
                     }
                     bytes_read = -1;
                     break;
@@ -281,7 +263,7 @@ void handle_client(int new_socket) {
                 chunks_received++;
 
                 string ack = "ACK:" + to_string(chunks_received) + "\n";
-                send(new_socket, ack.c_str(), ack.length(), 0);
+                Net::sendData(sock, ack.c_str(), ack.length());
 
                 if (write_buffer.size() >= FLUSH_THRESHOLD) {
                     outfile.write(write_buffer.data(), write_buffer.size());
@@ -295,23 +277,23 @@ void handle_client(int new_socket) {
             if (outfile.is_open()) outfile.close();
         } else {
             string resp = "REQUEST_REJECT:" + id + "\n";
-            send(new_socket, resp.c_str(), resp.length(), 0);
+            Net::sendData(sock, resp.c_str(), resp.length());
+            cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
         }
 
         {
             lock_guard<mutex> lock(requests_mutex);
             pending_requests.erase(id);
         }
-        close(new_socket);
+        Net::closeSocket(sock);
     } else {
-        close(new_socket);
+        Net::closeSocket(sock);
     }
 }
 
 void run_tcp_server() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int reuse = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    socket_t server_fd = Net::createSocket(SOCK_STREAM);
+    Net::setReuseAddr(server_fd);
     struct sockaddr_in address;
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -323,10 +305,11 @@ void run_tcp_server() {
         int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
         thread(handle_client, new_socket).detach();
     }
-    close(server_fd);
+    Net::closeSocket(server_fd);
 }
 
 int main() {
+    Net::init();
     setvbuf(stdout, NULL, _IONBF, 0);
     cout << "LIGHTHOUSE CORE ENGINE STARTED\n";
     thread mouth(run_udp_broadcaster);
@@ -337,5 +320,6 @@ int main() {
     ear.join();
     hands.join();
     brain.join();
+    Net::cleanup();
     return 0;
 }

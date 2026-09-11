@@ -8,6 +8,28 @@ const fs = require('fs');
 
 const app = express();
 const os = require('os');
+const HISTORY_FILE = './transfers.json';
+
+// Helper to load transfer history
+function loadHistory() {
+    if (!fs.existsSync(HISTORY_FILE)) return [];
+    try {
+        const data = fs.readFileSync(HISTORY_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch (e) {
+        console.error("Error loading history:", e);
+        return [];
+    }
+}
+
+// Helper to save transfer history
+function saveHistory(history) {
+    try {
+        fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
+    } catch (e) {
+        console.error("Error saving history:", e);
+    }
+}
 
 // Helper to get all IP addresses of the CURRENT machine
 function getMyIPs() {
@@ -100,6 +122,14 @@ app.post('/transfer/decision', (req, res) => {
     res.json({ success: true });
 });
 
+// --- HISTORY API ---
+app.get('/api/transfers', (req, res) => {
+    res.json(loadHistory());
+});
+
+// Track active transfers: transferId -> { process, filename, targetIp }
+const activeTransfers = new Map();
+
 // --- FILE UPLOAD & SEND ROUTE ---
 app.post('/send', upload.single('file'), (req, res) => {
     const { targetIp } = req.body;
@@ -109,25 +139,78 @@ app.post('/send', upload.single('file'), (req, res) => {
         return res.status(400).json({ error: "Target IP missing" });
     }
 
-    console.log(`🚀 Sending ${req.file.originalname} → ${targetIp}`);
+    const transferId = Date.now().toString();
+    const filename = req.file.originalname;
+
+    const history = loadHistory();
+    const newTransfer = {
+        id: transferId,
+        filename: filename,
+        size: req.file.size,
+        targetIp,
+        startTime: new Date().toISOString(),
+        status: 'pending'
+    };
+    history.unshift(newTransfer);
+    saveHistory(history);
+
+    console.log(`🚀 Starting async send: ${filename} → ${targetIp} [ID: ${transferId}]`);
 
     const sender = spawn('./sender', [targetIp, filePath]);
+    activeTransfers.set(transferId, { process: sender, filename, targetIp });
 
     sender.stdout.on("data", (data) => {
-        console.log(`📤 [SENDER]: ${data.toString()}`);
+        const output = data.toString();
+        const lines = output.split('\n');
+
+        lines.forEach(line => {
+            if (line.startsWith('SENDER_PROGRESS:')) {
+                const parts = line.substring(16).split('|');
+                if (parts.length === 3) {
+                    const [sId, current, total] = parts;
+                    const progress = Math.round((parseInt(current) / parseInt(total)) * 100);
+                    io.emit('sending-progress', {
+                        transferId: sId,
+                        filename,
+                        progress,
+                        status: 'sending'
+                    });
+                }
+            } else {
+                console.log(`📤 [SENDER ${transferId}]: ${line}`);
+            }
+        });
     });
 
     sender.stderr.on("data", (data) => {
-        console.error(`❌ [SENDER ERROR]: ${data.toString()}`);
+        console.error(`❌ [SENDER ${transferId} ERROR]: ${data.toString()}`);
     });
 
     sender.on('close', (code) => {
-        console.log(`🏁 Sender finished (Code: ${code})`);
+        console.log(`🏁 Sender ${transferId} finished (Code: ${code})`);
+
+        const currentHistory = loadHistory();
+        const idx = currentHistory.findIndex(t => t.id === transferId);
+        if (idx !== -1) {
+            currentHistory[idx].endTime = new Date().toISOString();
+            currentHistory[idx].status = code === 0 ? 'success' : 'failed';
+            saveHistory(currentHistory);
+        }
+
+        io.emit('sending-progress', {
+            transferId,
+            filename,
+            status: code === 0 ? 'completed' : 'failed'
+        });
+
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
-        res.json({ success: code === 0 });
+        activeTransfers.delete(transferId);
     });
+
+    // Return immediately
+    res.json({ success: true, transferId });
 });
 
 // --- SOCKET CONNECTION ---

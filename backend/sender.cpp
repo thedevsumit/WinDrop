@@ -1,13 +1,13 @@
 #include <iostream>
 #include <fstream>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <cstring>
 #include <random>
 #include <algorithm>
 #include <vector>
 #include "sha256.h"
+#include "net_platform.h"
+
+using namespace std;
 
 using namespace std;
 
@@ -34,11 +34,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    Net::init();
     string target_ip = argv[1];
     string file_path = argv[2];
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    socket_t sock = Net::createSocket(SOCK_STREAM);
+    if (sock == -1) {
         cerr << "Socket creation error" << endl;
         return 1;
     }
@@ -46,7 +47,7 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(8080);
-    if (inet_pton(AF_INET, target_ip.c_str(), &serv_addr.sin_addr) <= 0) {
+    if (Net::inetPton(target_ip.c_str(), &serv_addr) <= 0) {
         cerr << "Invalid address/ Address not supported" << endl;
         return 1;
     }
@@ -61,11 +62,11 @@ int main(int argc, char *argv[]) {
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
     string resume_query = "RESUME_QUERY:" + filename + "|" + to_string(fileSize) + "\n";
-    send(sock, resume_query.c_str(), resume_query.length(), 0);
+    Net::sendData(sock, resume_query.c_str(), resume_query.length());
 
     char buffer[1024];
     memset(buffer, 0, 1024);
-    int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    int bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
     int lastChunk = 0;
     if (bytes_received > 0) {
         string response(buffer, bytes_received);
@@ -85,14 +86,14 @@ int main(int argc, char *argv[]) {
     string senderName(hostname);
 
     string request = "REQUEST:" + requestId + "|" + filename + "|" + to_string(fileSize) + "|" + senderName + "\n";
-    send(sock, request.c_str(), request.length(), 0);
+    Net::sendData(sock, request.c_str(), request.length());
     cout << "📡 Handshake request sent (" << requestId << "). Waiting for acceptance..." << endl;
 
     memset(buffer, 0, 1024);
-    bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
     if (bytes_received <= 0) {
         cerr << "❌ Connection lost during handshake." << endl;
-        close(sock);
+        Net::closeSocket(sock);
         return 1;
     }
 
@@ -103,7 +104,7 @@ int main(int argc, char *argv[]) {
         ifstream infile(file_path, ios::binary);
         if (!infile.is_open()) {
             cerr << "Could not open file: " << file_path << endl;
-            close(sock);
+            Net::closeSocket(sock);
             return 1;
         }
 
@@ -112,21 +113,30 @@ int main(int argc, char *argv[]) {
         }
 
         char fileBuffer[4096];
+        int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        int currentChunk = lastChunk;
+
         while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0) {
             int bytes_to_send = infile.gcount();
-            send(sock, fileBuffer, bytes_to_send, 0);
+            Net::sendData(sock, fileBuffer, bytes_to_send);
+
             memset(buffer, 0, 1024);
-            recv(sock, buffer, sizeof(buffer), 0);
+            int ack_bytes = Net::recvData(sock, buffer, sizeof(buffer), 0);
+
+            if (ack_bytes > 0) {
+                currentChunk += (bytes_to_send + CHUNK_SIZE - 1) / CHUNK_SIZE;
+                cout << "SENDER_PROGRESS:" << requestId << "|" << currentChunk << "|" << totalChunks << endl;
+            }
         }
 
         // Delivery Confirmation
         string checksum = WinDrop::computeSHA256(file_path);
         string complete_msg = "COMPLETE:" + checksum + "\n";
-        send(sock, complete_msg.c_str(), complete_msg.length(), 0);
+        Net::sendData(sock, complete_msg.c_str(), complete_msg.length());
         cout << "🏁 File sent. Waiting for delivery confirmation..." << endl;
 
         memset(buffer, 0, 1024);
-        bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
         if (bytes_received > 0) {
             string final_resp(buffer, bytes_received);
             if (final_resp.find("DELIVERED_ACK") == 0) {
@@ -145,6 +155,7 @@ int main(int argc, char *argv[]) {
         cerr << "❌ Transfer rejected by receiver." << endl;
     }
 
-    close(sock);
+    Net::closeSocket(sock);
+    Net::cleanup();
     return 0;
 }

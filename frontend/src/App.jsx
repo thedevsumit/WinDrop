@@ -8,16 +8,27 @@ function App() {
   const [peers, setPeers] = useState([]);
   const [selectedFile, setSelectedFile] = useState(null);
   const [isSearching, setIsSearching] = useState(true);
-  const [sendingTo, setSendingTo] = useState(null);
-  const [sendStatus, setSendStatus] = useState(null);
+  const [activeTransfers, setActiveTransfers] = useState({});
   const [isDragging, setIsDragging] = useState(false);
   const [dragCounter, setDragCounter] = useState(0);
   const [transferRequest, setTransferRequest] = useState(null);
   const [receivingProgress, setReceivingProgress] = useState(null);
   const [transferError, setTransferError] = useState(null);
+  const [history, setHistory] = useState([]);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const res = await axios.get(`http://${window.location.hostname}:5000/api/transfers`);
+        setHistory(res.data);
+      } catch (err) {
+        console.error("Failed to fetch history", err);
+      }
+    };
+
+    fetchHistory();
+
     socket.on("peers_list", (peerList) => {
       setPeers(peerList);
       setIsSearching(false);
@@ -34,6 +45,17 @@ function App() {
     socket.on("transfer-error", (data) => {
       setTransferError(data);
       setTimeout(() => setTransferError(null), 5000);
+    });
+
+    socket.on("sending-progress", (data) => {
+      setActiveTransfers((prev) => ({
+        ...prev,
+        [data.transferId]: {
+          filename: data.filename,
+          progress: data.progress,
+          status: data.status,
+        },
+      }));
     });
 
     return () => {
@@ -96,21 +118,26 @@ function App() {
 
   const handleSend = async (targetIp) => {
     if (!selectedFile) return;
-    setSendingTo(targetIp);
-    setSendStatus(null);
 
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("targetIp", targetIp);
 
     try {
-      await axios.post(`http://${window.location.hostname}:5000/send`, formData);
-      setSendStatus({ success: true, ip: targetIp });
+      const res = await axios.post(`http://${window.location.hostname}:5000/send`, formData);
+      if (res.data.transferId) {
+        setActiveTransfers((prev) => ({
+          ...prev,
+          [res.data.transferId]: {
+            filename: selectedFile.name,
+            progress: 0,
+            status: "sending",
+          },
+        }));
+      }
     } catch (err) {
       console.error(err);
-      setSendStatus({ success: false, ip: targetIp });
     }
-    setSendingTo(null);
   };
 
   const openFileDialog = () => {
@@ -229,6 +256,41 @@ function App() {
           </div>
         )}
 
+        {Object.entries(activeTransfers).length > 0 && (
+          <div style={styles.progressContainer}>
+            <div style={styles.progressHeader}>
+              <span style={styles.progressTitle}>Sending Files...</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              {Object.entries(activeTransfers).map(([id, transfer]) => (
+                <div key={id} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <div style={styles.progressHeader}>
+                    <span style={{ fontSize: "12px", color: "#1a1a1a" }}>{transfer.filename}</span>
+                    <span style={styles.progressPercent}>
+                      {transfer.status === 'completed' ? '100%' :
+                       transfer.status === 'failed' ? 'Error' :
+                       `${transfer.progress}%`}
+                    </span>
+                  </div>
+                  <div style={styles.progressBarBg}>
+                    <div
+                      style={{
+                        ...styles.progressBarFill,
+                        background: transfer.status === 'completed' ? '#22c55e' :
+                                   transfer.status === 'failed' ? '#f43f5e' :
+                                   'linear-gradient(90deg, #f97316, #ea580c)',
+                        width: transfer.status === 'completed' ? '100%' :
+                               transfer.status === 'failed' ? '0%' :
+                               `${transfer.progress}%`
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div style={styles.statusBar}>
           {isSearching && (
             <div style={styles.searching}>
@@ -251,19 +313,10 @@ function App() {
 
         <div style={styles.devicesList}>
           {peers.map((peer) => {
-            const isSending = sendingTo === peer.ip;
-            const isDone = sendStatus?.ip === peer.ip;
-            const success = isDone && sendStatus?.success;
-            const failed = isDone && !sendStatus?.success;
-
             return (
               <div
                 key={peer.ip}
-                style={{
-                  ...styles.deviceCard,
-                  ...(success ? styles.deviceCardSuccess : {}),
-                  ...(failed ? styles.deviceCardError : {}),
-                }}
+                style={styles.deviceCard}
               >
                 <div style={styles.deviceLeft}>
                   <div style={styles.deviceIcon}>📱</div>
@@ -275,28 +328,42 @@ function App() {
                 <button
                   style={{
                     ...styles.sendButton,
-                    ...(success ? styles.buttonSuccess : {}),
-                    ...(failed ? styles.buttonError : {}),
-                    ...(isSending ? styles.buttonSending : {}),
                     ...(!selectedFile ? styles.buttonDisabled : {}),
                   }}
                   onClick={() => handleSend(peer.ip)}
-                  disabled={!selectedFile || isSending}
+                  disabled={!selectedFile}
                 >
-                  {isSending ? (
-                    <Spinner />
-                  ) : success ? (
-                    <AnimatedCheck />
-                  ) : failed ? (
-                    <FailedX />
-                  ) : (
-                    "Send"
-                  )}
+                  Send
                 </button>
               </div>
             );
           })}
         </div>
+
+        {history.length > 0 && (
+          <div style={styles.historySection}>
+            <h3 style={styles.historyTitle}>Recent Transfers</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {history.slice(0, 5).map((item) => (
+                <div key={item.id} style={styles.historyItem}>
+                  <div style={styles.historyFileInfo}>
+                    <span style={styles.historyFileName}>{item.filename}</span>
+                    <span style={styles.historyFileMeta}>
+                      {item.targetIp} • {(item.size / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                  </div>
+                  <span style={{
+                    ...styles.historyStatus,
+                    ...(item.status === 'success' ? styles.statusSuccess :
+                      item.status === 'failed' ? styles.statusFailed : styles.statusPending)
+                  }}>
+                    {item.status.toUpperCase()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -530,6 +597,57 @@ const styles = {
     borderRadius: "16px",
     border: "1.5px solid #f0f0f0",
     transition: "all 0.2s ease",
+  },
+  historySection: {
+    marginTop: "32px",
+    borderTop: "1px solid #f0f0f0",
+    paddingTop: "24px",
+  },
+  historyTitle: {
+    fontSize: "16px",
+    fontWeight: "700",
+    color: "#1a1a1a",
+    marginBottom: "16px",
+    textAlign: "left",
+  },
+  historyItem: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "12px 0",
+    borderBottom: "1px solid #f5f5f5",
+  },
+  historyFileInfo: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+  },
+  historyFileName: {
+    fontSize: "14px",
+    fontWeight: "500",
+    color: "#1a1a1a",
+  },
+  historyFileMeta: {
+    fontSize: "12px",
+    color: "#a3a3a3",
+  },
+  historyStatus: {
+    fontSize: "12px",
+    fontWeight: "600",
+    padding: "4px 8px",
+    borderRadius: "8px",
+  },
+  statusSuccess: {
+    background: "#f0fdf4",
+    color: "#16a34a",
+  },
+  statusFailed: {
+    background: "#fef2f2",
+    color: "#dc2626",
+  },
+  statusPending: {
+    background: "#fff7ed",
+    color: "#ea580c",
   },
   deviceCardSuccess: {
     borderColor: "#bbf7d0",
