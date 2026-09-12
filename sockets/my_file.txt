@@ -1,2 +1,0 @@
-This is a massive file transfer test for WinDrop.
- 
