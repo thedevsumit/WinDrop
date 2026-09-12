@@ -10,7 +10,7 @@
 #include <vector>
 #include "sha256.h"
 #include "net_platform.h"
-
+#include "metadata.h"
 using namespace std;
 
 const int CHUNK_SIZE = 1024;
@@ -93,27 +93,6 @@ void run_udp_listener()
     Net::closeSocket(sock);
 }
 
-void save_metadata(const string &filename, long long totalSize, int lastChunk)
-{
-    ofstream meta(filename + ".part.meta");
-    meta << totalSize << "\n"
-         << CHUNK_SIZE << "\n"
-         << lastChunk << "\n";
-    meta.close();
-}
-
-int read_metadata(const string &filename, long long &totalSize)
-{
-    ifstream meta(filename + ".part.meta");
-    if (!meta)
-        return -1;
-    int lastChunk;
-    int chunkSize;
-    if (!(meta >> totalSize >> chunkSize >> lastChunk))
-        return -1;
-    return lastChunk;
-}
-
 void run_stdin_listener()
 {
     string line;
@@ -171,7 +150,7 @@ void handle_client(int new_socket)
             string filename = payload.substr(pos1 + 1, pos2 - pos1 - 1);
             long long size = stoll(payload.substr(pos2 + 1));
             long long metaSize;
-            int lastChunk = read_metadata(filename, metaSize);
+            int lastChunk = WinDrop::read_metadata(filename, metaSize);
             if (lastChunk != -1 && metaSize == size)
             {
                 string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
@@ -278,7 +257,7 @@ void handle_client(int new_socket)
             string part_filename = filename + ".part";
 
             long long metaSize;
-            int lastChunk = read_metadata(filename, metaSize);
+            int lastChunk = WinDrop::read_metadata(filename, metaSize);
             if (lastChunk != -1 && metaSize == total_size)
             {
                 chunks_received = lastChunk;
@@ -328,7 +307,7 @@ void handle_client(int new_socket)
                     {
                         outfile.write(write_buffer.data(), write_buffer.size());
                         chunks_received += write_buffer.size() / CHUNK_SIZE;
-                        save_metadata(filename, total_size, chunks_received);
+                        WinDrop::save_metadata(filename, total_size,CHUNK_SIZE,chunks_received);
                         write_buffer.clear();
                     }
 
@@ -375,7 +354,7 @@ void handle_client(int new_socket)
                 if (write_buffer.size() >= FLUSH_THRESHOLD)
                 {
                     outfile.write(write_buffer.data(), write_buffer.size());
-                    save_metadata(filename, total_size, chunks_received);
+                    WinDrop::save_metadata(filename, total_size,CHUNK_SIZE,chunks_received);
                     write_buffer.clear();
                     cout << "💾 Flushed buffer to disk at chunk " << chunks_received << endl;
                 }

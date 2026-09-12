@@ -1,0 +1,81 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-cpp:
+    name: Build C++ core/sender (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW (Windows only)
+        if: runner.os == 'Windows'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: Build core + sender (Linux)
+        if: runner.os == 'Linux'
+        working-directory: backend
+        run: |
+          g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_posix.cpp -o core
+          g++ -std=c++17 sender.cpp sha256.cpp net_platform_posix.cpp -o sender
+
+      - name: Build core + sender (Windows)
+        if: runner.os == 'Windows'
+        working-directory: backend
+        run: |
+          g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_win.cpp -o core.exe -lws2_32
+          g++ -std=c++17 sender.cpp sha256.cpp net_platform_win.cpp -o sender.exe -lws2_32
+        shell: bash
+
+  unit-tests:
+    name: Run unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW (Windows only)
+        if: runner.os == 'Windows'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: Build and run SHA-256 tests
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256
+          ./test_sha256
+        shell: bash
+
+      - name: Build and run metadata/resume tests
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata
+          ./test_metadata
+        shell: bash
+
+  node-syntax:
+    name: Backend JS syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check index.js syntax
+        working-directory: backend
+        run: node --check index.js
