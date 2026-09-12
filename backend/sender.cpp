@@ -9,26 +9,18 @@
 
 using namespace std;
 
-
 const int CHUNK_SIZE = 1024;
 
-string generateRequestId() {
-    const string charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    string id = "";
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_int_distribution<> dis(0, charset.size() - 1);
-    for (int i = 0; i < 8; ++i) id += charset[dis(gen)];
-    return id;
-}
-
-long long getFileSize(const string& filePath) {
+long long getFileSize(const string &filePath)
+{
     ifstream in(filePath, ios::binary | ios::ate);
     return in.tellg();
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
+int main(int argc, char *argv[])
+{
+    if (argc < 4)
+    {
         cerr << "Usage: ./sender <target_ip> <file_path>" << endl;
         return 1;
     }
@@ -36,9 +28,11 @@ int main(int argc, char *argv[]) {
     Net::init();
     string target_ip = argv[1];
     string file_path = argv[2];
+    string requestId = argv[3];
 
     socket_t sock = Net::createSocket(SOCK_STREAM);
-    if (sock == -1) {
+    if (sock == -1)
+    {
         cerr << "Socket creation error" << endl;
         return 1;
     }
@@ -46,14 +40,16 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(8080);
-    if (Net::inetPton(target_ip.c_str(), &serv_addr) <= 0) {
+    if (Net::inetPton(target_ip.c_str(), &serv_addr) <= 0)
+    {
         cerr << "Invalid address/ Address not supported" << endl;
         return 1;
     }
 
     cout << "🔄 Attempting connection to " << target_ip << "..." << endl;
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        cerr << "connection Failed. Is the other C++ engine running?" << endl;
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
         return 1;
     }
 
@@ -66,21 +62,25 @@ int main(int argc, char *argv[]) {
     memset(buffer, 0, 1024);
     int bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
     int lastChunk = 0;
-    if (bytes_received > 0) {
+    if (bytes_received > 0)
+    {
         string response(buffer, bytes_received);
-        if (response.find("RESUME_RESPONSE:OK|") == 0) {
+        if (response.find("RESUME_RESPONSE:OK|") == 0)
+        {
             string chunk_str = response.substr(18);
             lastChunk = stoi(chunk_str);
             cout << "🔄 Resuming transfer from chunk " << lastChunk << endl;
-        } else {
+        }
+        else
+        {
             cout << "🆕 Starting new transfer." << endl;
         }
     }
 
     // Handshake
-    string requestId = generateRequestId();
     char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) != 0) strcpy(hostname, "Unknown_Peer");
+    if (gethostname(hostname, sizeof(hostname)) != 0)
+        strcpy(hostname, "Unknown_Peer");
     string senderName(hostname);
 
     string request = "REQUEST:" + requestId + "|" + filename + "|" + to_string(fileSize) + "|" + senderName + "\n";
@@ -89,24 +89,28 @@ int main(int argc, char *argv[]) {
 
     memset(buffer, 0, 1024);
     bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
-    if (bytes_received <= 0) {
-        cerr << "❌ Connection lost during handshake." << endl;
+    if (bytes_received <= 0)
+    {
+        cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
         Net::closeSocket(sock);
         return 1;
     }
 
     string response(buffer, bytes_received);
-    if (response.find("REQUEST_ACCEPT:" + requestId) == 0) {
+    if (response.find("REQUEST_ACCEPT:" + requestId) == 0)
+    {
         cout << "✅ Transfer accepted! Starting stream..." << endl;
 
         ifstream infile(file_path, ios::binary);
-        if (!infile.is_open()) {
-            cerr << "Could not open file: " << file_path << endl;
+        if (!infile.is_open())
+        {
+            cout << "ERROR:PERMISSION_DENIED|" << requestId << endl;
             Net::closeSocket(sock);
             return 1;
         }
 
-        if (lastChunk > 0) {
+        if (lastChunk > 0)
+        {
             infile.seekg((long long)lastChunk * CHUNK_SIZE);
         }
 
@@ -114,16 +118,23 @@ int main(int argc, char *argv[]) {
         int totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
         int currentChunk = lastChunk;
 
-        while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0) {
+        while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0)
+        {
             int bytes_to_send = infile.gcount();
             Net::sendData(sock, fileBuffer, bytes_to_send);
 
             memset(buffer, 0, 1024);
             int ack_bytes = Net::recvData(sock, buffer, sizeof(buffer) - 1);
 
-            if (ack_bytes > 0) {
+            if (ack_bytes > 0)
+            {
                 currentChunk += (bytes_to_send + CHUNK_SIZE - 1) / CHUNK_SIZE;
                 cout << "SENDER_PROGRESS:" << requestId << "|" << currentChunk << "|" << totalChunks << endl;
+            }
+            else
+            {
+                cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+                break;
             }
         }
 
@@ -135,22 +146,33 @@ int main(int argc, char *argv[]) {
 
         memset(buffer, 0, 1024);
         bytes_received = Net::recvData(sock, buffer, sizeof(buffer) - 1);
-        if (bytes_received > 0) {
+        if (bytes_received > 0)
+        {
             string final_resp(buffer, bytes_received);
-            if (final_resp.find("DELIVERED_ACK") == 0) {
+            if (final_resp.find("DELIVERED_ACK") == 0)
+            {
                 cout << "🌟 SUCCESS: File delivered and verified!" << endl;
-            } else if (final_resp.find("ERROR:CHECKSUM_MISMATCH") == 0) {
-                cerr << "❌ ERROR: Checksum mismatch on receiver side!" << endl;
+            }
+            else if (final_resp.find("ERROR:CHECKSUM_MISMATCH") == 0) {
+                cout << "ERROR:CHECKSUM_MISMATCH|" << requestId << endl;
+            } else if (final_resp.find("ERROR:DISK_FULL") == 0) {
+                cout << "ERROR:DISK_FULL|" << requestId << endl;
             } else {
-                cerr << "❌ Received unexpected response: " << final_resp << endl;
+                cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
             }
         } else {
-            cerr << "❌ Connection lost while waiting for confirmation." << endl;
+            cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
         }
 
         infile.close();
-    } else {
-        cerr << "❌ Transfer rejected by receiver." << endl;
+    }
+    else if (response.find("ERROR:FILE_BUSY") == 0)
+    {
+        cout << "ERROR:FILE_BUSY|" << requestId << endl;
+    }
+    else
+    {
+        cout << "ERROR:TRANSFER_REJECTED|" << requestId << endl;
     }
 
     Net::closeSocket(sock);

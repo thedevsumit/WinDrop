@@ -89,8 +89,8 @@ coreEngine.stdout.on('data', (data) => {
                     io.emit('peers_list', peerList);
                 }
             }
-        } else if (line.includes('INCOMING_REQUEST: ')) {
-            const parts = line.split('INCOMING_REQUEST: ');
+        } else if (line.includes('INCOMING_REQUEST:')) {
+            const parts = line.split('INCOMING_REQUEST:');
             if (parts.length > 1) {
                 const payload = parts[1].trim();
                 const [id, filename, size, sender] = payload.split('|');
@@ -98,7 +98,7 @@ coreEngine.stdout.on('data', (data) => {
                 io.emit('incoming-transfer-request', { id, filename, size, sender });
             }
         } else if (line.includes('TRANSFER_PROGRESS:')) {
-            const parts = line.split('TRANSFER_PROGRESS: ');
+            const parts = line.split('TRANSFER_PROGRESS:');
             if (parts.length > 1) {
                 const payload = parts[1].trim();
                 const [id, currentChunk, totalChunks] = payload.split('|');

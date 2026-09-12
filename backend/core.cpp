@@ -3,6 +3,7 @@
 #include <thread>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <condition_variable>
 #include <sstream>
@@ -28,6 +29,11 @@ struct RequestState {
 
 map<string, shared_ptr<RequestState>> pending_requests;
 mutex requests_mutex;
+
+// --- GAP 4: Single-Writer Guard Globals ---
+set active_writes;
+mutex writes_mutex;
+// ------------------------------------------
 
 string getLocalIP() {
     return Net::getLocalIP();
@@ -103,11 +109,11 @@ void run_stdin_listener() {
         if (!id.empty() && id.back() == '\r') id.pop_back();
         if (!id.empty() && id.back() == '\n') id.pop_back();
 
-        lock_guard<mutex> lock(requests_mutex);
+        lock_guard lock(requests_mutex);
         if (pending_requests.count(id)) {
             auto state = pending_requests[id];
             {
-                lock_guard<mutex> state_lock(state->mtx);
+                lock_guard state_lock(state->mtx);
                 state->decision_made = true;
                 state->accepted = (command == "REQUEST_ACCEPT");
             }
@@ -141,7 +147,7 @@ void handle_client(int new_socket) {
                 string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
                 Net::sendData(sock, resp.c_str(), resp.length());
             } else if (lastChunk != -1 && metaSize != size) {
-                cout << "ERROR:RESUME_STATE_INVALID" << endl;
+                cout << "ERROR:RESUME_STATE_INVALID|" << endl;
                 string resp = "RESUME_RESPONSE:NO\n";
                 Net::sendData(sock, resp.c_str(), resp.length());
             } else {
@@ -187,14 +193,30 @@ void handle_client(int new_socket) {
         try { state->size = stoll(size_str); } catch (...) { state->size = 0; }
 
         {
-            lock_guard<mutex> lock(requests_mutex);
+            lock_guard lock(requests_mutex);
             pending_requests[id] = state;
         }
 
-        unique_lock<mutex> state_lock(state->mtx);
+        unique_lock state_lock(state->mtx);
         state->cv.wait(state_lock, [&]{ return state->decision_made; });
 
         if (state->accepted) {
+            // --- GAP 4: Single-Writer Guard Check ---
+            {
+                lock_guard write_lock(writes_mutex);
+                if (active_writes.count(filename)) {
+                    Net::sendData(sock, "ERROR:FILE_BUSY\n", 16);
+                    cout << "ERROR:FILE_BUSY|" << id << endl;
+                    Net::closeSocket(sock);
+                    
+                    lock_guard req_lock(requests_mutex);
+                    pending_requests.erase(id);
+                    return;
+                }
+                active_writes.insert(filename);
+            }
+            // ----------------------------------------
+
             string resp = "REQUEST_ACCEPT:" + id + "\n";
             Net::sendData(sock, resp.c_str(), resp.length());
 
@@ -216,11 +238,25 @@ void handle_client(int new_socket) {
                 string err = "ERROR:PERMISSION_DENIED\n";
                 Net::sendData(sock, err.c_str(), err.length());
                 Net::closeSocket(sock);
+                
+                // --- GAP 4: Erase from both maps on early return (Leak Fix) ---
+                {
+                    lock_guard write_lock(writes_mutex);
+                    active_writes.erase(filename);
+                }
+                {
+                    lock_guard req_lock(requests_mutex);
+                    pending_requests.erase(id);
+                }
+                // --------------------------------------------------------------
                 return;
             }
 
             vector<char> write_buffer;
             const size_t FLUSH_THRESHOLD = 16 * CHUNK_SIZE;
+            
+            // --- GAP 1: Track clean protocol exits ---
+            bool transfer_completed = false; 
 
             while ((bytes_read = Net::recvData(sock, buffer, sizeof(buffer))) > 0) {
                 if (bytes_read < 1024 && string(buffer, bytes_read).find("COMPLETE:") == 0) {
@@ -245,14 +281,21 @@ void handle_client(int new_socket) {
                             string meta_file = filename + ".part.meta";
                             remove(meta_file.c_str());
                             Net::sendData(sock, "DELIVERED_ACK\n", 14);
+                            
+                            // --- GAP 3: Signal final success to Node.js ---
+                            cout << "RECEIVED_OK|" << id << endl; 
                         } else {
+                            cout << "ERROR:DISK_FULL|" << id << endl;
                             Net::sendData(sock, "ERROR:DISK_FULL\n", 16);
                         }
                     } else {
                         cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
-                        cout << "ERROR:CHECKSUM_MISMATCH" << endl;
+                        cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
                         Net::sendData(sock, "ERROR:CHECKSUM_MISMATCH\n", 24);
                     }
+                    
+                    // --- GAP 1 (Bug A): Mark clean exit regardless of checksum success/fail ---
+                    transfer_completed = true; 
                     bytes_read = -1;
                     break;
                 }
@@ -273,6 +316,19 @@ void handle_client(int new_socket) {
                 cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
             }
             if (outfile.is_open()) outfile.close();
+            
+            // --- GAP 1: Detect sudden network drops ---
+            if (!transfer_completed) {
+                cout << "ERROR:PEER_DISCONNECTED|" << id << endl;
+            }
+
+            // --- GAP 4: Release the filename lock ---
+            {
+                lock_guard write_lock(writes_mutex);
+                active_writes.erase(filename);
+            }
+            // ----------------------------------------
+            
         } else {
             string resp = "REQUEST_REJECT:" + id + "\n";
             Net::sendData(sock, resp.c_str(), resp.length());
@@ -280,7 +336,7 @@ void handle_client(int new_socket) {
         }
 
         {
-            lock_guard<mutex> lock(requests_mutex);
+            lock_guard lock(requests_mutex);
             pending_requests.erase(id);
         }
         Net::closeSocket(sock);
@@ -321,4 +377,3 @@ int main() {
     Net::cleanup();
     return 0;
 }
-
