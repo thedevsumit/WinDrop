@@ -17,11 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MinGW (Windows only)
+      - name: Set up MSYS2 (Windows only)
         if: runner.os == 'Windows'
-        uses: egor-tensin/setup-mingw@v2
+        uses: msys2/setup-msys2@v2
         with:
-          platform: x64
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
 
       - name: Build core + sender (Linux)
         if: runner.os == 'Linux'
@@ -48,11 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MinGW (Windows only)
+      - name: Set up MSYS2 (Windows only)
         if: runner.os == 'Windows'
-        uses: egor-tensin/setup-mingw@v2
+        uses: msys2/setup-msys2@v2
         with:
-          platform: x64
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
 
       - name: Build and run SHA-256 tests
         working-directory: tests
