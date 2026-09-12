@@ -58,18 +58,34 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc
 
-      - name: Build and run SHA-256 tests
+      - name: Build and run SHA-256 tests (Linux)
+        if: runner.os == 'Linux'
         working-directory: tests
         run: |
           g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256
           ./test_sha256
+
+      - name: Build and run SHA-256 tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256.exe
+          ./test_sha256.exe
         shell: bash
 
-      - name: Build and run metadata/resume tests
+      - name: Build and run metadata/resume tests (Linux)
+        if: runner.os == 'Linux'
         working-directory: tests
         run: |
           g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata
           ./test_metadata
+
+      - name: Build and run metadata/resume tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata.exe
+          ./test_metadata.exe
         shell: bash
 
   node-syntax:
