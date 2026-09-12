@@ -314,9 +314,6 @@ io.on("connection", (socket) => {
         name,
         ip
     }));
-    if (peerList.length === 0) {
-        peerList.push({ name: "Fedora_Test_PC", ip: "10.88.206.69" });
-    }
     socket.emit("peers_list", peerList);
 });
 
