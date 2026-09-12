@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     // Resume Support
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
-    string resume_query = "RESUME_QUERY:" + filename + "|" + to_string(fileSize) + "\n";
+    string resume_query = "RESUME_QUERY:" + requestId + "|" + filename + "|" + to_string(fileSize) + "\n";
     Net::sendData(sock, resume_query.c_str(), resume_query.length());
     char buffer[1024];
     memset(buffer, 0, 1024);
