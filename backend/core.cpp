@@ -31,7 +31,7 @@ map<string, shared_ptr<RequestState>> pending_requests;
 mutex requests_mutex;
 
 // --- GAP 4: Single-Writer Guard Globals ---
-set active_writes;
+set<string> active_writes;
 mutex writes_mutex;
 // ------------------------------------------
 
