@@ -12,7 +12,7 @@ WinDrop moves files directly between peers on a LAN with no server, no cloud, an
 [![C++](https://img.shields.io/badge/C%2B%2B-P2P_Core-00599C?logo=cplusplus&logoColor=white)]()
 [![Socket.IO](https://img.shields.io/badge/Socket.IO-Realtime-black?logo=socket.io&logoColor=white)]()
 [![Cross Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)]()
-
+[![Build & Test](https://github.com/thedevsumit/WinDrop/actions/workflows/build.yml/badge.svg)](https://github.com/thedevsumit/WinDrop/actions/workflows/build.yml)
 </div>
 
 ---
