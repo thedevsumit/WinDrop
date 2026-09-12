@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <thread>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <set>
@@ -58,7 +59,7 @@ void run_udp_broadcaster()
     while (true)
     {
         Net::sendData(sock, message.c_str(), message.length());
-        sleep(2);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
     Net::closeSocket(sock);
 }
