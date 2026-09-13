@@ -30,7 +30,7 @@ namespace Net {
     void enableBroadcast(socket_t fd);
     void joinMulticastGroup(socket_t fd, const char* group);
     void setMulticastInterface(socket_t fd, const char* localIp);
-    
+    void setNoDelay(socket_t fd);
     // Addressing
     int inetPton(const char* ip, struct sockaddr_in* addr);
     std::string inetNton(struct sockaddr_in* addr);

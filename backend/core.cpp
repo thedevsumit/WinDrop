@@ -16,7 +16,7 @@
 
 using namespace std;
 
-const int CHUNK_SIZE = 1024;
+const int CHUNK_SIZE = 65536;
 
 struct RequestState
 {
@@ -98,10 +98,10 @@ void run_udp_listener()
     // TODO: joinMulticastGroup currently returns void; consider changing it to
     // return int so a failed join can be logged here too.
 
-    char buffer[1024];
+    char buffer[65536];
     while (true)
     {
-        memset(buffer, 0, 1024);
+        memset(buffer, 0, 65536);
         int bytes = Net::recvData(sock, buffer, sizeof(buffer) - 1);
         if (bytes <= 0)
             continue;
@@ -148,8 +148,9 @@ void run_stdin_listener()
 void handle_client(int new_socket)
 {
     socket_t sock = (socket_t)new_socket;
-    char buffer[1024];
-    memset(buffer, 0, 1024);
+    Net::setNoDelay(sock);
+    char buffer[65536];
+    memset(buffer, 0, 65536);
     int bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
     if (bytes_read <= 0)
     {
@@ -189,7 +190,7 @@ void handle_client(int new_socket)
                 Net::sendData(sock, resp.c_str(), resp.length());
             }
         }
-        memset(buffer, 0, 1024);
+        memset(buffer, 0, 65536);
         bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
         if (bytes_read <= 0)
         {
@@ -285,7 +286,7 @@ void handle_client(int new_socket)
                 cout << "🔄 Resuming transfer from chunk " << chunks_received << endl;
             }
 
-            memset(buffer, 0, 1024);
+            memset(buffer, 0, 65536);
             ofstream outfile(part_filename, ios::binary | ios::app);
             if (!outfile)
             {
@@ -312,27 +313,54 @@ void handle_client(int new_socket)
 
             // --- GAP 1: Track clean protocol exits ---
             bool transfer_completed = false;
+            long long bytes_received_total = (long long)chunks_received * CHUNK_SIZE;
+            auto lastReport = std::chrono::steady_clock::now();
 
-            while ((bytes_read = Net::recvData(sock, buffer, sizeof(buffer))) > 0)
+            while (bytes_received_total < total_size)
             {
-                if (bytes_read < 1024 && string(buffer, bytes_read).find("COMPLETE:") == 0)
+                long long remaining = total_size - bytes_received_total;
+                size_t to_read = (size_t)std::min((long long)sizeof(buffer), remaining);
+                bytes_read = Net::recvData(sock, buffer, to_read);
+
+                if (bytes_read <= 0)
+                    break; // disconnect — transfer_completed stays false
+
+                write_buffer.insert(write_buffer.end(), buffer, buffer + bytes_read);
+                bytes_received_total += bytes_read;
+                chunks_received = (int)(bytes_received_total / CHUNK_SIZE);
+
+                if (write_buffer.size() >= FLUSH_THRESHOLD || bytes_received_total == total_size)
                 {
-                    string complete_msg = string(buffer, bytes_read);
+                    outfile.write(write_buffer.data(), write_buffer.size());
+                    WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
+                    write_buffer.clear();
+                }
+
+                // Progress sampling
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count() >= 150)
+                {
+                    cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
+                    lastReport = now;
+                }
+            }
+
+            // Loop exits exactly when all file bytes are in — now safely read the control message
+            if (bytes_received_total == total_size)
+            {
+                outfile.close();
+                char completeBuf[128];
+                memset(completeBuf, 0, sizeof(completeBuf));
+                int n = Net::recvData(sock, completeBuf, sizeof(completeBuf) - 1);
+                string complete_msg(completeBuf, n > 0 ? n : 0);
+
+                if (complete_msg.find("COMPLETE:") == 0)
+                {
                     string sender_checksum = complete_msg.substr(9);
                     if (!sender_checksum.empty() && sender_checksum.back() == '\n')
                         sender_checksum.pop_back();
                     if (!sender_checksum.empty() && sender_checksum.back() == '\r')
                         sender_checksum.pop_back();
-
-                    if (!write_buffer.empty())
-                    {
-                        outfile.write(write_buffer.data(), write_buffer.size());
-                        chunks_received += write_buffer.size() / CHUNK_SIZE;
-                        WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
-                        write_buffer.clear();
-                    }
-
-                    outfile.close();
 
                     string local_checksum = WinDrop::computeSHA256(part_filename);
                     if (local_checksum == sender_checksum)
@@ -359,31 +387,14 @@ void handle_client(int new_socket)
                         cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
                         Net::sendData(sock, "ERROR:CHECKSUM_MISMATCH\n", 24);
                     }
-
-                    // --- GAP 1 (Bug A): Mark clean exit regardless of checksum success/fail ---
                     transfer_completed = true;
-                    bytes_read = -1;
-                    break;
                 }
-
-                write_buffer.insert(write_buffer.end(), buffer, buffer + bytes_read);
-                chunks_received++;
-
-                string ack = "ACK:" + to_string(chunks_received) + "\n";
-                Net::sendData(sock, ack.c_str(), ack.length());
-
-                if (write_buffer.size() >= FLUSH_THRESHOLD)
-                {
-                    outfile.write(write_buffer.data(), write_buffer.size());
-                    WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
-                    write_buffer.clear();
-                    cout << "💾 Flushed buffer to disk at chunk " << chunks_received << endl;
-                }
-
-                cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
             }
-            if (outfile.is_open())
-                outfile.close();
+            else
+            {
+                if (outfile.is_open())
+                    outfile.close();
+            }
 
             // --- GAP 1: Detect sudden network drops ---
             if (!transfer_completed)

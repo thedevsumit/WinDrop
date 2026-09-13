@@ -4,6 +4,8 @@
 #include <netdb.h>
 #include <cstring>
 #include <net/if.h>
+#include <csignal>
+#include <netinet/tcp.h>
 namespace Net
 {
     socket_t createSocket(int type)
@@ -42,7 +44,11 @@ namespace Net
         int broadcast = 1;
         setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
     }
-
+    void setNoDelay(socket_t fd)
+    {
+        int flag = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    }
     void joinMulticastGroup(socket_t fd, const char *group)
     {
         struct ip_mreq mreq;
@@ -96,6 +102,8 @@ namespace Net
         return best_ip;
     }
 
-    void init() {}
+    void init() {
+        signal(SIGPIPE, SIG_IGN);  
+    }
     void cleanup() {}
 }

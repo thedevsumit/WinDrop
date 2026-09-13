@@ -4,7 +4,7 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <vector>
-
+#include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -23,6 +23,12 @@ namespace Net
     int sendData(socket_t fd, const void *buf, size_t len)
     {
         return send(fd, (const char *)buf, len, 0);
+    }
+
+    void setNoDelay(socket_t fd)
+    {
+        int flag = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&flag, sizeof(flag));
     }
 
     int sendTo(socket_t fd, const void *buf, size_t len, const struct sockaddr_in *addr)
