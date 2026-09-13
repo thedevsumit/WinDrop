@@ -4,9 +4,14 @@ echo "Building WinDrop..."
 
 cleanup() {
     echo -e "\nShutting down WinDrop..."
-    kill $NODE_PID $FRONTEND_PID 2>/dev/null
+
+    kill "$NODE_PID" "$FRONTEND_PID" 2>/dev/null
+
     pkill -f "./core" 2>/dev/null
+    pkill -f "./core.exe" 2>/dev/null
     pkill -f "./sender" 2>/dev/null
+    pkill -f "./sender.exe" 2>/dev/null
+
     echo "Shutdown complete."
     exit 0
 }
@@ -14,17 +19,53 @@ cleanup() {
 trap cleanup SIGINT
 
 echo "Setting up Backend..."
-cd backend || { echo "Backend directory not found"; exit 1; }
+
+cd backend || {
+    echo "Backend directory not found"
+    exit 1
+}
 
 echo "Compiling C++ Engines..."
-if [ "$(uname)" = "Linux" ] || [ "$(uname)" = "Darwin" ]; then
-    PLATFORM_FILE="net_platform_posix.cpp"
-else
-    PLATFORM_FILE="net_platform_win.cpp"
-fi
 
-g++ -pthread core.cpp sha256.cpp "$PLATFORM_FILE" -o core || { echo "Compilation of core failed"; exit 1; }
-g++ -pthread sender.cpp sha256.cpp "$PLATFORM_FILE" -o sender || { echo "Compilation of sender failed"; exit 1; }
+OS_NAME="$(uname)"
+
+if [[ "$OS_NAME" == "Linux" || "$OS_NAME" == "Darwin" ]]; then
+
+    PLATFORM_FILE="net_platform_posix.cpp"
+
+    echo "Compiling for POSIX ($OS_NAME)..."
+
+    g++ -pthread -std=c++17 core.cpp sha256.cpp "$PLATFORM_FILE" \
+        -o core -lssl -lcrypto || {
+        echo "Compilation of core failed"
+        exit 1
+    }
+
+    g++ -std=c++17 sender.cpp sha256.cpp "$PLATFORM_FILE" \
+        -o sender -lssl -lcrypto || {
+        echo "Compilation of sender failed"
+        exit 1
+    }
+
+else
+
+    PLATFORM_FILE="net_platform_win.cpp"
+
+    echo "Compiling for Windows (MinGW)..."
+
+    g++ -pthread -std=c++17 core.cpp sha256.cpp "$PLATFORM_FILE" \
+        -o core.exe -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32 || {
+        echo "Compilation of core.exe failed"
+        exit 1
+    }
+
+    g++ -std=c++17 sender.cpp sha256.cpp "$PLATFORM_FILE" \
+        -o sender.exe -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32 || {
+        echo "Compilation of sender.exe failed"
+        exit 1
+    }
+
+fi
 
 if [ ! -d "node_modules" ]; then
     echo "Installing backend modules..."
@@ -32,13 +73,18 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo "Starting Node Backend..."
+
 node index.js &
 NODE_PID=$!
 
 cd ..
 
 echo "Setting up Frontend..."
-cd frontend || { echo "Frontend directory not found"; exit 1; }
+
+cd frontend || {
+    echo "Frontend directory not found"
+    exit 1
+}
 
 if [ ! -d "node_modules" ]; then
     echo "Installing frontend modules..."
@@ -46,9 +92,10 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo "Starting React Frontend..."
+
 BROWSER=none npm run dev &
 FRONTEND_PID=$!
 
 echo -e "\nWinDrop is Live! Press Ctrl+C to safely shut everything down.\n"
 
-wait $NODE_PID $FRONTEND_PID
+wait "$NODE_PID" "$FRONTEND_PID"
