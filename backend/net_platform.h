@@ -26,11 +26,11 @@ namespace Net {
     int sendTo(socket_t fd, const void* buf, size_t len, const struct sockaddr_in* addr);
     int recvData(socket_t fd, void* buf, size_t len);
 
-    // Configuration
     void setReuseAddr(socket_t fd);
     void enableBroadcast(socket_t fd);
     void joinMulticastGroup(socket_t fd, const char* group);
-
+    void setMulticastInterface(socket_t fd, const char* localIp);
+    
     // Addressing
     int inetPton(const char* ip, struct sockaddr_in* addr);
     std::string inetNton(struct sockaddr_in* addr);

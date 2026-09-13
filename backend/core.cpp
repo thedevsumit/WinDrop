@@ -9,9 +9,11 @@
 #include <condition_variable>
 #include <sstream>
 #include <vector>
+#include <random>
 #include "sha256.h"
 #include "net_platform.h"
 #include "metadata.h"
+
 using namespace std;
 
 const int CHUNK_SIZE = 1024;
@@ -37,6 +39,11 @@ set<string> active_writes;
 mutex writes_mutex;
 // ------------------------------------------
 
+// Shared session ID: generated once in main() before threads start,
+// then read (never written) by both the broadcaster and listener threads.
+// Write-once-then-read-only means no mutex is needed around it.
+string my_session_id;
+
 string getLocalIP()
 {
     return Net::getLocalIP();
@@ -50,15 +57,24 @@ void run_udp_broadcaster()
     broadcast_addr.sin_family = AF_INET;
     broadcast_addr.sin_port = htons(8888);
     broadcast_addr.sin_addr.s_addr = inet_addr("239.255.255.250");
+
     string ip = getLocalIP();
+    Net::setMulticastInterface(sock, ip.c_str());
+
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) != 0)
         strcpy(hostname, "Unknown_Peer");
     string name(hostname);
-    string message = name + ":" + ip + " Alive";
+
+    string message = name + ":" + ip + ":" + my_session_id + " Alive";
+
     while (true)
     {
-        Net::sendData(sock, message.c_str(), message.length());
+        int result = Net::sendTo(sock, message.c_str(), message.length(), &broadcast_addr);
+        if (result < 0)
+        {
+            cerr << "[broadcaster] sendTo failed" << endl;
+        }
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
     Net::closeSocket(sock);
@@ -72,12 +88,16 @@ void run_udp_listener()
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(8888);
     listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr));
+
+    if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0)
+    {
+        cerr << "[listener] bind failed — port 8888 may be in use" << endl;
+    }
+
     Net::joinMulticastGroup(sock, "239.255.255.250");
-    char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) != 0)
-        strcpy(hostname, "Unknown_Peer");
-    string my_name(hostname);
+    // TODO: joinMulticastGroup currently returns void; consider changing it to
+    // return int so a failed join can be logged here too.
+
     char buffer[1024];
     while (true)
     {
@@ -86,7 +106,7 @@ void run_udp_listener()
         if (bytes <= 0)
             continue;
         string received_msg(buffer, bytes);
-        if (received_msg.find(my_name) == string::npos)
+        if (received_msg.find(my_session_id) == string::npos)
         {
             cout << "Founded Peer: " << buffer << "\n";
         }
@@ -308,7 +328,7 @@ void handle_client(int new_socket)
                     {
                         outfile.write(write_buffer.data(), write_buffer.size());
                         chunks_received += write_buffer.size() / CHUNK_SIZE;
-                        WinDrop::save_metadata(filename, total_size,CHUNK_SIZE,chunks_received);
+                        WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
                         write_buffer.clear();
                     }
 
@@ -355,7 +375,7 @@ void handle_client(int new_socket)
                 if (write_buffer.size() >= FLUSH_THRESHOLD)
                 {
                     outfile.write(write_buffer.data(), write_buffer.size());
-                    WinDrop::save_metadata(filename, total_size,CHUNK_SIZE,chunks_received);
+                    WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
                     write_buffer.clear();
                     cout << "💾 Flushed buffer to disk at chunk " << chunks_received << endl;
                 }
@@ -420,6 +440,14 @@ int main()
 {
     Net::init();
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    // Generate the session ID once, before any thread starts, so both the
+    // broadcaster and listener see the same value with no race condition.
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dist(100000, 999999);
+    my_session_id = to_string(dist(gen));
+
     cout << "LIGHTHOUSE CORE ENGINE STARTED\n";
     thread mouth(run_udp_broadcaster);
     thread ear(run_udp_listener);
