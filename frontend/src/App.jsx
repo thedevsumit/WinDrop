@@ -15,6 +15,9 @@ function App() {
   const [receivingProgress, setReceivingProgress] = useState(null);
   const [transferError, setTransferError] = useState(null);
   const [history, setHistory] = useState([]);
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [manualPeers, setManualPeers] = useState([]);
+  const [manualIp, setManualIp] = useState("");
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -28,6 +31,21 @@ function App() {
     };
 
     fetchHistory();
+
+    socket.on("connect", () => {
+      console.log("✅ Connected to backend at", socket.io.uri);
+      setBackendConnected(true);
+    });
+
+    socket.on("disconnect", () => {
+      console.log("❌ Disconnected from backend");
+      setBackendConnected(false);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error("❌ Backend connection error:", err.message, "— tried:", socket.io.uri);
+      setBackendConnected(false);
+    });
 
     socket.on("peers_list", (peerList) => {
       setPeers(peerList);
@@ -59,12 +77,31 @@ function App() {
     });
 
     return () => {
+      socket.off("connect");
+      socket.off("disconnect");
+      socket.off("connect_error");
       socket.off("peers_list");
       socket.off("incoming-transfer-request");
       socket.off("transfer-progress");
       socket.off("transfer-error");
+      socket.off("sending-progress");
     };
   }, []);
+
+  const handleAddManualPeer = () => {
+    const ip = manualIp.trim();
+    if (!ip) return;
+    const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (!ipPattern.test(ip)) {
+      alert("Enter a valid IPv4 address, e.g. 192.168.1.42");
+      return;
+    }
+    setManualPeers((prev) => {
+      if (prev.some((p) => p.ip === ip) || peers.some((p) => p.ip === ip)) return prev;
+      return [...prev, { name: `Manual (${ip})`, ip, manual: true }];
+    });
+    setManualIp("");
+  };
 
 
   const handleDecision = async (decision) => {
@@ -291,6 +328,11 @@ function App() {
           </div>
         )}
 
+        <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: backendConnected ? "#22c55e" : "#f43f5e", marginBottom: "8px" }}>
+          <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: backendConnected ? "#22c55e" : "#f43f5e", display: "inline-block" }} />
+          {backendConnected ? "Connected to backend" : "Not connected to backend — check that it's running and reachable"}
+        </div>
+
         <div style={styles.statusBar}>
           {isSearching && (
             <div style={styles.searching}>
@@ -300,26 +342,43 @@ function App() {
               <span>Scanning network...</span>
             </div>
           )}
-          {!isSearching && peers.length > 0 && (
+          {!isSearching && peers.length + manualPeers.length > 0 && (
             <div style={styles.deviceCount}>
-              <span style={styles.count}>{peers.length}</span>
-              <span>device{peers.length !== 1 ? "s" : ""} online</span>
+              <span style={styles.count}>{peers.length + manualPeers.length}</span>
+              <span>device{peers.length + manualPeers.length !== 1 ? "s" : ""} online</span>
             </div>
           )}
-          {!isSearching && peers.length === 0 && (
+          {!isSearching && peers.length + manualPeers.length === 0 && (
             <div style={styles.noDevices}>No devices on network</div>
           )}
         </div>
 
+        <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+          <input
+            type="text"
+            value={manualIp}
+            onChange={(e) => setManualIp(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAddManualPeer()}
+            placeholder="Or add a device by IP (e.g. 192.168.1.42)"
+            style={{ flex: 1, padding: "8px 10px", borderRadius: "8px", border: "1px solid #333", background: "#1a1a1a", color: "#eee", fontSize: "13px" }}
+          />
+          <button
+            onClick={handleAddManualPeer}
+            style={{ padding: "8px 14px", borderRadius: "8px", border: "none", background: "#333", color: "#eee", fontSize: "13px", cursor: "pointer" }}
+          >
+            Add
+          </button>
+        </div>
+
         <div style={styles.devicesList}>
-          {peers.map((peer) => {
+          {[...peers, ...manualPeers].map((peer) => {
             return (
               <div
                 key={peer.ip}
                 style={styles.deviceCard}
               >
                 <div style={styles.deviceLeft}>
-                  <div style={styles.deviceIcon}>📱</div>
+                  <div style={styles.deviceIcon}>{peer.manual ? "🖥️" : "📱"}</div>
                   <div style={styles.deviceInfo}>
                     <div style={styles.deviceName}>{peer.name}</div>
                     <div style={styles.deviceIp}>{peer.ip}</div>
