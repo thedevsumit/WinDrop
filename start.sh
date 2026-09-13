@@ -18,6 +18,50 @@ cleanup() {
 
 trap cleanup SIGINT
 
+check_dependencies() {
+    local missing=0
+
+    if ! command -v g++ &> /dev/null; then
+        echo "Missing: g++ (a C++ compiler)"
+        missing=1
+    fi
+
+    if ! command -v openssl &> /dev/null; then
+        echo "Missing: openssl (used to generate the local TLS certificate)"
+        missing=1
+    fi
+
+    if ! command -v node &> /dev/null; then
+        echo "Missing: node (Node.js runtime)"
+        missing=1
+    fi
+
+    if [ "$missing" -eq 1 ]; then
+        echo ""
+        echo "One or more required tools are missing. Install them with:"
+        OS_NAME_CHECK="$(uname)"
+        if [[ "$OS_NAME_CHECK" == "Linux" ]]; then
+            if command -v apt &> /dev/null; then
+                echo "  sudo apt update && sudo apt install -y build-essential libssl-dev nodejs npm"
+            elif command -v dnf &> /dev/null; then
+                echo "  sudo dnf install -y gcc-c++ openssl openssl-devel nodejs npm"
+            elif command -v pacman &> /dev/null; then
+                echo "  sudo pacman -S base-devel openssl nodejs npm"
+            else
+                echo "  Install g++, openssl (with dev headers), and Node.js using your distro's package manager."
+            fi
+        elif [[ "$OS_NAME_CHECK" == "Darwin" ]]; then
+            echo "  brew install gcc openssl@3 node"
+        else
+            echo "  Install MinGW-w64 (g++), OpenSSL, and Node.js for Windows."
+        fi
+        echo ""
+        exit 1
+    fi
+}
+
+check_dependencies
+
 echo "Setting up Backend..."
 
 cd backend || {
