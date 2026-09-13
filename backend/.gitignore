@@ -8,3 +8,4 @@ sender
 uploads/
 transfers.json
 .vscode/
+*.pem

@@ -195,6 +195,7 @@ coreEngine.stdout.on('data', (data) => {
             const errorMessages = {
                 'CHECKSUM_MISMATCH': 'The received file is corrupted.',
                 'DISK_FULL': 'Receiver disk is full.',
+                'TLS_HANDSHAKE_FAILED': 'Could not establish a secure connection to the peer.',
                 'PERMISSION_DENIED': 'Receiver could not write the file.',
                 'TRANSFER_REJECTED': 'The transfer was rejected.',
                 'RESUME_STATE_INVALID': 'Cannot resume from the current state.',
@@ -373,6 +374,7 @@ app.post('/send', upload.single('file'), (req, res) => {
                 const [code, id] = rawError.split('|');
 
                 const errorMessages = {
+                    'TLS_HANDSHAKE_FAILED': 'Could not establish a secure connection to the peer.',
                     'CHECKSUM_MISMATCH': 'The received file is corrupted.',
                     'DISK_FULL': 'Receiver disk is full.',
                     'PERMISSION_DENIED': 'Receiver could not write the file.',
