@@ -168,7 +168,6 @@ chmod +x start.sh
 
 - [ ] Real cross-machine throughput benchmarks (before/after the streaming redesign, and plaintext vs. TLS overhead) — pending access to a second physical machine
 - [ ] Trust-on-first-use or pre-shared certificate fingerprint, to harden the TLS trust model beyond "any cert is accepted"
-- [ ] Manual "Add Device by IP" fallback in the UI, plus a live backend-connection-status indicator — for networks/environments (e.g. WSL2's default NAT mode) where UDP multicast discovery doesn't reach across the virtual network boundary
 - [ ] Folder / multi-file transfer
 - [ ] Bandwidth throttling
 - [ ] Guard against two concurrent inbound transfers writing to the same destination filename
