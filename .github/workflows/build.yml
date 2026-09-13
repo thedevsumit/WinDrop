@@ -39,10 +39,10 @@ jobs:
       - name: Build core + sender (Windows)
         if: runner.os == 'Windows'
         working-directory: backend
+        shell: msys2 {0}
         run: |
-          g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_win.cpp -o core.exe -I/mingw64/include -L/mingw64/lib -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32
-          g++ -std=c++17 sender.cpp sha256.cpp net_platform_win.cpp -o sender.exe -I/mingw64/include -L/mingw64/lib -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32
-        shell: bash
+          g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_win.cpp -o core.exe -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32
+          g++ -std=c++17 sender.cpp sha256.cpp net_platform_win.cpp -o sender.exe -lws2_32 -liphlpapi -lssl -lcrypto -lcrypt32
 
   unit-tests:
     name: Run unit tests (${{ matrix.os }})
@@ -76,10 +76,10 @@ jobs:
       - name: Build and run SHA-256 tests (Windows)
         if: runner.os == 'Windows'
         working-directory: tests
+        shell: msys2 {0}
         run: |
-          g++ -std=c++17 -I../backend -I/mingw64/include -L/mingw64/lib test_sha256.cpp ../backend/sha256.cpp -o test_sha256.exe
+          g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256.exe
           ./test_sha256.exe
-        shell: bash
 
       - name: Build and run metadata/resume tests (Linux)
         if: runner.os == 'Linux'
@@ -91,10 +91,10 @@ jobs:
       - name: Build and run metadata/resume tests (Windows)
         if: runner.os == 'Windows'
         working-directory: tests
+        shell: msys2 {0}
         run: |
-          g++ -std=c++17 -I../backend -I/mingw64/include -L/mingw64/lib test_metadata.cpp -o test_metadata.exe
+          g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata.exe
           ./test_metadata.exe
-        shell: bash
 
   node-syntax:
     name: Backend JS syntax check
