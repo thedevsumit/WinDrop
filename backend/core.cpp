@@ -17,7 +17,7 @@
 using namespace std;
 
 const int CHUNK_SIZE = 65536;
-
+SSL_CTX *g_server_tls_ctx = nullptr;
 struct RequestState
 {
     int socket;
@@ -149,12 +149,18 @@ void handle_client(int new_socket)
 {
     socket_t sock = (socket_t)new_socket;
     Net::setNoDelay(sock);
+    SSL *ssl = Net::tlsAccept(sock, g_server_tls_ctx);
+    if (!ssl)
+    {
+        Net::closeTLS(ssl,sock);
+        return;
+    }
     char buffer[65536];
     memset(buffer, 0, 65536);
-    int bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
+    int bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
     if (bytes_read <= 0)
     {
-        Net::closeSocket(sock);
+        Net::closeTLS(ssl,sock);
         return;
     }
 
@@ -176,25 +182,25 @@ void handle_client(int new_socket)
             if (lastChunk != -1 && metaSize == size)
             {
                 string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
-                Net::sendData(sock, resp.c_str(), resp.length());
+                Net::sendData(ssl, resp.c_str(), resp.length());
             }
             else if (lastChunk != -1 && metaSize != size)
             {
                 cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
                 string resp = "RESUME_RESPONSE:NO\n";
-                Net::sendData(sock, resp.c_str(), resp.length());
+                Net::sendData(ssl, resp.c_str(), resp.length());
             }
             else
             {
                 string resp = "RESUME_RESPONSE:NO\n";
-                Net::sendData(sock, resp.c_str(), resp.length());
+                Net::sendData(ssl, resp.c_str(), resp.length());
             }
         }
         memset(buffer, 0, 65536);
-        bytes_read = Net::recvData(sock, buffer, sizeof(buffer) - 1);
+        bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
         if (bytes_read <= 0)
         {
-            Net::closeSocket(sock);
+            Net::closeTLS(ssl,sock);
             return;
         }
         raw_data = string(buffer, bytes_read);
@@ -214,7 +220,7 @@ void handle_client(int new_socket)
 
         if (parts.size() < 4)
         {
-            Net::closeSocket(sock);
+            Net::closeTLS(ssl,sock);
             return;
         }
 
@@ -259,9 +265,9 @@ void handle_client(int new_socket)
                 lock_guard write_lock(writes_mutex);
                 if (active_writes.count(filename))
                 {
-                    Net::sendData(sock, "ERROR:FILE_BUSY\n", 16);
+                    Net::sendData(ssl, "ERROR:FILE_BUSY\n", 16);
                     cout << "ERROR:FILE_BUSY|" << id << endl;
-                    Net::closeSocket(sock);
+                    Net::closeTLS(ssl,sock);
 
                     lock_guard req_lock(requests_mutex);
                     pending_requests.erase(id);
@@ -272,7 +278,7 @@ void handle_client(int new_socket)
             // ----------------------------------------
 
             string resp = "REQUEST_ACCEPT:" + id + "\n";
-            Net::sendData(sock, resp.c_str(), resp.length());
+            Net::sendData(ssl, resp.c_str(), resp.length());
 
             long long total_size = state->size;
             int chunks_received = 0;
@@ -292,8 +298,8 @@ void handle_client(int new_socket)
             {
                 cout << "ERROR:PERMISSION_DENIED|" << id << endl;
                 string err = "ERROR:PERMISSION_DENIED\n";
-                Net::sendData(sock, err.c_str(), err.length());
-                Net::closeSocket(sock);
+                Net::sendData(ssl, err.c_str(), err.length());
+                Net::closeTLS(ssl,sock);
 
                 // --- GAP 4: Erase from both maps on early return (Leak Fix) ---
                 {
@@ -320,7 +326,7 @@ void handle_client(int new_socket)
             {
                 long long remaining = total_size - bytes_received_total;
                 size_t to_read = (size_t)std::min((long long)sizeof(buffer), remaining);
-                bytes_read = Net::recvData(sock, buffer, to_read);
+                bytes_read = Net::recvData(ssl, buffer, to_read);
 
                 if (bytes_read <= 0)
                     break; // disconnect — transfer_completed stays false
@@ -351,7 +357,7 @@ void handle_client(int new_socket)
                 outfile.close();
                 char completeBuf[128];
                 memset(completeBuf, 0, sizeof(completeBuf));
-                int n = Net::recvData(sock, completeBuf, sizeof(completeBuf) - 1);
+                int n = Net::recvData(ssl, completeBuf, sizeof(completeBuf) - 1);
                 string complete_msg(completeBuf, n > 0 ? n : 0);
 
                 if (complete_msg.find("COMPLETE:") == 0)
@@ -370,7 +376,7 @@ void handle_client(int new_socket)
                             cout << "✅ File Verified and Saved: " << filename << endl;
                             string meta_file = filename + ".part.meta";
                             remove(meta_file.c_str());
-                            Net::sendData(sock, "DELIVERED_ACK\n", 14);
+                            Net::sendData(ssl, "DELIVERED_ACK\n", 14);
 
                             // --- GAP 3: Signal final success to Node.js ---
                             cout << "RECEIVED_OK|" << id << endl;
@@ -378,14 +384,14 @@ void handle_client(int new_socket)
                         else
                         {
                             cout << "ERROR:DISK_FULL|" << id << endl;
-                            Net::sendData(sock, "ERROR:DISK_FULL\n", 16);
+                            Net::sendData(ssl, "ERROR:DISK_FULL\n", 16);
                         }
                     }
                     else
                     {
                         cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
                         cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
-                        Net::sendData(sock, "ERROR:CHECKSUM_MISMATCH\n", 24);
+                        Net::sendData(ssl, "ERROR:CHECKSUM_MISMATCH\n", 24);
                     }
                     transfer_completed = true;
                 }
@@ -412,7 +418,7 @@ void handle_client(int new_socket)
         else
         {
             string resp = "REQUEST_REJECT:" + id + "\n";
-            Net::sendData(sock, resp.c_str(), resp.length());
+            Net::sendData(ssl, resp.c_str(), resp.length());
             cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
         }
 
@@ -420,11 +426,11 @@ void handle_client(int new_socket)
             lock_guard lock(requests_mutex);
             pending_requests.erase(id);
         }
-        Net::closeSocket(sock);
+        Net::closeTLS(ssl, sock);
     }
     else
     {
-        Net::closeSocket(sock);
+        Net::closeTLS(ssl, sock);
     }
 }
 
@@ -449,9 +455,15 @@ void run_tcp_server()
 
 int main()
 {
+
     Net::init();
     setvbuf(stdout, NULL, _IONBF, 0);
-
+    g_server_tls_ctx = Net::createServerTLSContext("cert.pem", "key.pem");
+    if (!g_server_tls_ctx)
+    {
+        cerr << "Failed to initialize TLS Context with cert.pem/key.pem" << endl;
+        return 1;
+    }
     // Generate the session ID once, before any thread starts, so both the
     // broadcaster and listener see the same value with no race condition.
     std::random_device rd;

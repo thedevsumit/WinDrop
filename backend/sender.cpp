@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     }
 
     Net::init();
-
+    SSL_CTX *client_tls_ctx = Net::createClientTLSContext();
     string target_ip = argv[1];
     string file_path = argv[2];
     string requestId = argv[3];
@@ -63,6 +63,15 @@ int main(int argc, char *argv[])
 
     Net::setNoDelay(sock);
 
+    SSL *ssl = Net::tlsConnect(sock, client_tls_ctx);
+    if (!ssl)
+    {
+        cout << "ERROR:TLS_HANDSHAKE_FAILED|" << requestId << endl;
+        Net::closeTLS(ssl, sock);
+        SSL_CTX_free(client_tls_ctx);
+        Net::cleanup();
+        return 1;
+    }
     // Resume Support
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
@@ -72,13 +81,13 @@ int main(int argc, char *argv[])
         filename + "|" +
         to_string(fileSize) + "\n";
 
-    Net::sendData(sock, resume_query.c_str(), resume_query.length());
+    Net::sendData(ssl, resume_query.c_str(), resume_query.length());
 
     char buffer[65536];
     memset(buffer, 0, sizeof(buffer));
 
     int bytes_received =
-        Net::recvData(sock, buffer, sizeof(buffer) - 1);
+        Net::recvData(ssl, buffer, sizeof(buffer) - 1);
 
     int lastChunk = 0;
 
@@ -114,7 +123,7 @@ int main(int argc, char *argv[])
         to_string(fileSize) + "|" +
         senderName + "\n";
 
-    Net::sendData(sock, request.c_str(), request.length());
+    Net::sendData(ssl, request.c_str(), request.length());
 
     cout << "📡 Handshake request sent (" << requestId
          << "). Waiting for acceptance..." << endl;
@@ -122,12 +131,13 @@ int main(int argc, char *argv[])
     memset(buffer, 0, sizeof(buffer));
 
     bytes_received =
-        Net::recvData(sock, buffer, sizeof(buffer) - 1);
+        Net::recvData(ssl, buffer, sizeof(buffer) - 1);
 
     if (bytes_received <= 0)
     {
         cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
-        Net::closeSocket(sock);
+        Net::closeTLS(ssl, sock);
+        SSL_CTX_free(client_tls_ctx);
         Net::cleanup();
         return 1;
     }
@@ -143,7 +153,8 @@ int main(int argc, char *argv[])
         if (!infile.is_open())
         {
             cout << "ERROR:PERMISSION_DENIED|" << requestId << endl;
-            Net::closeSocket(sock);
+            Net::closeTLS(ssl, sock);
+            SSL_CTX_free(client_tls_ctx);
             Net::cleanup();
             return 1;
         }
@@ -171,14 +182,15 @@ int main(int argc, char *argv[])
             streamsize bytes_to_send = infile.gcount();
 
             int sent =
-                Net::sendData(sock, fileBuffer, bytes_to_send);
+                Net::sendData(ssl, fileBuffer, bytes_to_send);
 
             if (sent <= 0)
             {
                 cout << "ERROR:PEER_DISCONNECTED|"
                      << requestId << endl;
 
-                Net::closeSocket(sock);
+                Net::closeTLS(ssl, sock);
+                SSL_CTX_free(client_tls_ctx);
                 Net::cleanup();
                 return 1;
             }
@@ -192,8 +204,8 @@ int main(int argc, char *argv[])
             auto now = chrono::steady_clock::now();
 
             if (chrono::duration_cast<chrono::milliseconds>(
-                    now - lastReport
-                ).count() >= 150)
+                    now - lastReport)
+                    .count() >= 150)
             {
                 cout << "SENDER_PROGRESS:"
                      << requestId << "|"
@@ -212,10 +224,9 @@ int main(int argc, char *argv[])
             "COMPLETE:" + checksum + "\n";
 
         Net::sendData(
-            sock,
+            ssl,
             complete_msg.c_str(),
-            complete_msg.length()
-        );
+            complete_msg.length());
 
         cout << "🏁 File sent. Waiting for delivery confirmation..."
              << endl;
@@ -223,7 +234,7 @@ int main(int argc, char *argv[])
         memset(buffer, 0, sizeof(buffer));
 
         bytes_received =
-            Net::recvData(sock, buffer, sizeof(buffer) - 1);
+            Net::recvData(ssl, buffer, sizeof(buffer) - 1);
 
         if (bytes_received > 0)
         {
@@ -268,8 +279,8 @@ int main(int argc, char *argv[])
              << requestId << endl;
     }
 
-    Net::closeSocket(sock);
+    Net::closeTLS(ssl, sock);
+    SSL_CTX_free(client_tls_ctx);
     Net::cleanup();
-
     return 0;
 }
