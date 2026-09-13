@@ -11,7 +11,7 @@
 
 using namespace std;
 
-const int CHUNK_SIZE = 65536;
+const int CHUNK_SIZE = 262144;
 
 long long getFileSize(const string &filePath)
 {
@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
     }
 
     Net::setNoDelay(sock);
-
+    Net::setSocketBufferSize(sock, 1 << 20);  
     SSL *ssl = Net::tlsConnect(sock, client_tls_ctx);
     if (!ssl)
     {

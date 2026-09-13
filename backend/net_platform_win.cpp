@@ -30,7 +30,11 @@ namespace Net
         int flag = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&flag, sizeof(flag));
     }
-
+    void setSocketBufferSize(socket_t fd, int bytes)
+    {
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bytes, sizeof(bytes));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bytes, sizeof(bytes));
+    }
     int sendTo(socket_t fd, const void *buf, size_t len, const struct sockaddr_in *addr)
     {
         return sendto(fd, (const char *)buf, len, 0, (struct sockaddr *)addr, sizeof(struct sockaddr_in));

@@ -49,6 +49,11 @@ namespace Net
         int flag = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     }
+    void setSocketBufferSize(socket_t fd, int bytes)
+    {
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+    }
     void joinMulticastGroup(socket_t fd, const char *group)
     {
         struct ip_mreq mreq;
@@ -102,8 +107,9 @@ namespace Net
         return best_ip;
     }
 
-    void init() {
-        signal(SIGPIPE, SIG_IGN);  
+    void init()
+    {
+        signal(SIGPIPE, SIG_IGN);
     }
     void cleanup() {}
 }

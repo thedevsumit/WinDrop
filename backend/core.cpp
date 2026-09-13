@@ -16,7 +16,8 @@
 
 using namespace std;
 
-const int CHUNK_SIZE = 65536;
+const int CHUNK_SIZE = 262144; // 256 KB read/recv buffer per call
+const size_t FLUSH_THRESHOLD = 1 << 20;
 SSL_CTX *g_server_tls_ctx = nullptr;
 struct RequestState
 {
@@ -149,18 +150,19 @@ void handle_client(int new_socket)
 {
     socket_t sock = (socket_t)new_socket;
     Net::setNoDelay(sock);
+    Net::setSocketBufferSize(sock, 1 << 20);
     SSL *ssl = Net::tlsAccept(sock, g_server_tls_ctx);
     if (!ssl)
     {
-        Net::closeTLS(ssl,sock);
+        Net::closeTLS(ssl, sock);
         return;
     }
-    char buffer[65536];
-    memset(buffer, 0, 65536);
+    char buffer[CHUNK_SIZE];
+    memset(buffer, 0, CHUNK_SIZE);
     int bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
     if (bytes_read <= 0)
     {
-        Net::closeTLS(ssl,sock);
+        Net::closeTLS(ssl, sock);
         return;
     }
 
@@ -200,7 +202,7 @@ void handle_client(int new_socket)
         bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
         if (bytes_read <= 0)
         {
-            Net::closeTLS(ssl,sock);
+            Net::closeTLS(ssl, sock);
             return;
         }
         raw_data = string(buffer, bytes_read);
@@ -220,7 +222,7 @@ void handle_client(int new_socket)
 
         if (parts.size() < 4)
         {
-            Net::closeTLS(ssl,sock);
+            Net::closeTLS(ssl, sock);
             return;
         }
 
@@ -267,7 +269,7 @@ void handle_client(int new_socket)
                 {
                     Net::sendData(ssl, "ERROR:FILE_BUSY\n", 16);
                     cout << "ERROR:FILE_BUSY|" << id << endl;
-                    Net::closeTLS(ssl,sock);
+                    Net::closeTLS(ssl, sock);
 
                     lock_guard req_lock(requests_mutex);
                     pending_requests.erase(id);
@@ -299,7 +301,7 @@ void handle_client(int new_socket)
                 cout << "ERROR:PERMISSION_DENIED|" << id << endl;
                 string err = "ERROR:PERMISSION_DENIED\n";
                 Net::sendData(ssl, err.c_str(), err.length());
-                Net::closeTLS(ssl,sock);
+                Net::closeTLS(ssl, sock);
 
                 // --- GAP 4: Erase from both maps on early return (Leak Fix) ---
                 {
@@ -315,8 +317,6 @@ void handle_client(int new_socket)
             }
 
             vector<char> write_buffer;
-            const size_t FLUSH_THRESHOLD = 16 * CHUNK_SIZE;
-
             // --- GAP 1: Track clean protocol exits ---
             bool transfer_completed = false;
             long long bytes_received_total = (long long)chunks_received * CHUNK_SIZE;
