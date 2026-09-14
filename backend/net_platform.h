@@ -143,7 +143,7 @@ namespace Net
         }
         closeSocket(sock);
     }
-    std::string getPeerCertFingerprint(SSL *ssl)
+    inline std::string getPeerCertFingerprint(SSL *ssl)
     {
         X509 *cert = SSL_get_peer_certificate(ssl);
         if (!cert)
