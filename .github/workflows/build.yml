@@ -95,7 +95,8 @@ jobs:
         run: |
           g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata.exe
           ./test_metadata.exe
-            - name: Build and run path sanitization tests (Linux)
+
+      - name: Build and run path sanitization tests (Linux)
         if: runner.os == 'Linux'
         working-directory: tests
         run: |
