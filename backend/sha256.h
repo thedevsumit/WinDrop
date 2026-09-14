@@ -10,6 +10,7 @@
 
 namespace WinDrop {
     std::string computeSHA256(const std::string& filePath);
+    std::string computeSHA256Prefix(const std::string& filePath, size_t maxBytes);
 }
 
 #endif

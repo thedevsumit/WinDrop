@@ -15,7 +15,7 @@ void check(const std::string &label, const std::string &actual, const std::strin
     else
     {
         std::cout << "FAIL: " << label << "\n  expected: " << expected
-                   << "\n  actual:   " << actual << std::endl;
+                  << "\n  actual:   " << actual << std::endl;
         failures++;
     }
 }
@@ -61,6 +61,44 @@ int main()
         failures++;
     }
 
+    std::ofstream a("test_prefix_a.tmp", std::ios::binary);
+    a << "AAAAAAAAAA" << "same-prefix-content-here" << "TAIL_ONE_XXXXXXXXXX";
+    a.close();
+    std::ofstream b("test_prefix_b.tmp", std::ios::binary);
+    b << "AAAAAAAAAA" << "same-prefix-content-here" << "TAIL_TWO_YYYYYYYYYYYYYYYYYYYY_LONGER";
+    b.close();
+    std::ofstream c("test_prefix_c.tmp", std::ios::binary);
+    c << "AAAAAAAAAA" << "DIFFERENT-PREFIX-CONTENT" << "TAIL_ONE_XXXXXXXXXX";
+    c.close();
+
+    size_t prefixLen = 34;
+    std::string hashA = WinDrop::computeSHA256Prefix("test_prefix_a.tmp", prefixLen);
+    std::string hashB = WinDrop::computeSHA256Prefix("test_prefix_b.tmp", prefixLen);
+    std::string hashC = WinDrop::computeSHA256Prefix("test_prefix_c.tmp", prefixLen);
+
+    check("same prefix, different tails -> same prefix hash", hashA, hashB);
+    if (hashA != hashC)
+    {
+        std::cout << "PASS: different prefix content -> different prefix hash" << std::endl;
+    }
+    else
+    {
+        std::cout << "FAIL: different prefix content produced the SAME hash" << std::endl;
+        failures++;
+    }
+
+    std::ofstream shortFile("test_prefix_short.tmp", std::ios::binary);
+    shortFile << "only-a-few-bytes";
+    shortFile.close();
+    check("prefix hash of a short file matches its full hash",
+          WinDrop::computeSHA256Prefix("test_prefix_short.tmp", 999999),
+          WinDrop::computeSHA256("test_prefix_short.tmp"));
+
+    std::remove("test_prefix_a.tmp");
+    std::remove("test_prefix_b.tmp");
+    std::remove("test_prefix_c.tmp");
+    std::remove("test_prefix_short.tmp");
+
     // Clean up temp files
     std::remove("test_empty.tmp");
     std::remove("test_abc.tmp");
@@ -75,7 +113,8 @@ int main()
     }
     else
     {
-        std::cout << "\n" << failures << " SHA-256 test(s) failed." << std::endl;
+        std::cout << "\n"
+                  << failures << " SHA-256 test(s) failed." << std::endl;
         return 1;
     }
 }

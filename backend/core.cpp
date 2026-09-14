@@ -175,43 +175,68 @@ void handle_client(int new_socket)
 
     // Handle Resume Query
     if (raw_data.find("RESUME_QUERY:") == 0)
+{
+    string payload = raw_data.substr(13);
+    size_t pos1 = payload.find('|');
+    size_t pos2 = (pos1 != string::npos) ? payload.find('|', pos1 + 1) : string::npos;
+    size_t pos3 = (pos2 != string::npos) ? payload.find('|', pos2 + 1) : string::npos;
+    if (pos1 != string::npos && pos2 != string::npos && pos3 != string::npos)
     {
-        string payload = raw_data.substr(13);
-        size_t pos1 = payload.find('|');
-        size_t pos2 = (pos1 != string::npos) ? payload.find('|', pos1 + 1) : string::npos;
-        if (pos1 != string::npos && pos2 != string::npos)
+        string resumeId = payload.substr(0, pos1);
+        string filename = payload.substr(pos1 + 1, pos2 - pos1 - 1);
+        long long size = stoll(payload.substr(pos2 + 1, pos3 - pos2 - 1));
+        string senderPrefixHash = payload.substr(pos3 + 1);
+        while (!senderPrefixHash.empty() && (senderPrefixHash.back() == '\n' || senderPrefixHash.back() == '\r'))
+            senderPrefixHash.pop_back();
+
+        long long metaSize;
+        int lastChunk = WinDrop::read_metadata(filename, metaSize);
+        string part_filename = filename + ".part";
+
+        if (lastChunk != -1 && metaSize == size)
         {
-            string resumeId = payload.substr(0, pos1);
-            string filename = payload.substr(pos1 + 1, pos2 - pos1 - 1);
-            long long size = stoll(payload.substr(pos2 + 1));
-            long long metaSize;
-            int lastChunk = WinDrop::read_metadata(filename, metaSize);
-            if (lastChunk != -1 && metaSize == size)
+            bool safeToResume = false;
+            if (lastChunk >= 1)
+            {
+                string localPrefixHash = WinDrop::computeSHA256Prefix(part_filename, CHUNK_SIZE);
+                safeToResume = (localPrefixHash == senderPrefixHash);
+            }
+
+            if (safeToResume)
             {
                 string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
                 Net::sendData(ssl, resp.c_str(), resp.length());
             }
-            else if (lastChunk != -1 && metaSize != size)
-            {
-                cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
-                string resp = "RESUME_RESPONSE:NO\n";
-                Net::sendData(ssl, resp.c_str(), resp.length());
-            }
             else
             {
+                cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
+                remove(part_filename.c_str());
+                remove((filename + ".part.meta").c_str());
                 string resp = "RESUME_RESPONSE:NO\n";
                 Net::sendData(ssl, resp.c_str(), resp.length());
             }
         }
-        memset(buffer, 0, 65536);
-        bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-        if (bytes_read <= 0)
+        else if (lastChunk != -1 && metaSize != size)
         {
-            Net::closeTLS(ssl, sock);
-            return;
+            cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
+            string resp = "RESUME_RESPONSE:NO\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
         }
-        raw_data = string(buffer, bytes_read);
+        else
+        {
+            string resp = "RESUME_RESPONSE:NO\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
+        }
     }
+    memset(buffer, 0, CHUNK_SIZE);
+    bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+    if (bytes_read <= 0)
+    {
+        Net::closeTLS(ssl, sock);
+        return;
+    }
+    raw_data = string(buffer, bytes_read);
+}
 
     if (raw_data.find("REQUEST:") == 0)
     {

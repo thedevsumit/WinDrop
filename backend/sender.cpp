@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
     }
 
     Net::setNoDelay(sock);
-    Net::setSocketBufferSize(sock, 1 << 20);  
+    Net::setSocketBufferSize(sock, 1 << 20);
     SSL *ssl = Net::tlsConnect(sock, client_tls_ctx);
     if (!ssl)
     {
@@ -76,10 +76,12 @@ int main(int argc, char *argv[])
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
 
+    string prefixHash = WinDrop::computeSHA256Prefix(file_path, CHUNK_SIZE);
     string resume_query =
         "RESUME_QUERY:" + requestId + "|" +
         filename + "|" +
-        to_string(fileSize) + "\n";
+        to_string(fileSize) + "|" +
+        prefixHash + "\n";
 
     Net::sendData(ssl, resume_query.c_str(), resume_query.length());
 
@@ -97,11 +99,17 @@ int main(int argc, char *argv[])
 
         if (response.find("RESUME_RESPONSE:OK|") == 0)
         {
-            string chunk_str = response.substr(18);
-            lastChunk = stoi(chunk_str);
-
-            cout << "🔄 Resuming transfer from chunk "
-                 << lastChunk << endl;
+            string chunk_str = response.substr(19);
+            try
+            {
+                lastChunk = stoi(chunk_str);
+                cout << "🔄 Resuming transfer from chunk " << lastChunk << endl;
+            }
+            catch (...)
+            {
+                cout << "⚠️ Malformed resume response, starting from scratch." << endl;
+                lastChunk = 0;
+            }
         }
         else
         {

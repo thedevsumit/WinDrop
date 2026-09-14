@@ -154,5 +154,34 @@ namespace WinDrop
         }
         return ss.str();
     }
+    std::string computeSHA256Prefix(const std::string &filePath, size_t maxBytes)
+    {
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file)
+            return "";
 
+        Sha256Context ctx;
+        unsigned char buffer[4096];
+        size_t remaining = maxBytes;
+
+        while (remaining > 0)
+        {
+            size_t toRead = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+            file.read(reinterpret_cast<char *>(buffer), toRead);
+            std::streamsize got = file.gcount();
+            if (got <= 0)
+                break;
+            ctx.update(buffer, static_cast<size_t>(got));
+            remaining -= static_cast<size_t>(got);
+        }
+        file.close();
+
+        unsigned char digest[32];
+        ctx.finalize(digest);
+        std::stringstream ss;
+        ss << std::hex << std::setfill('0');
+        for (int i = 0; i < 32; ++i)
+            ss << std::setw(2) << (int)digest[i];
+        return ss.str();
+    }
 }
