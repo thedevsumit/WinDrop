@@ -31,10 +31,11 @@ Most "file sharing" side projects are a thin wrapper around an HTTP upload endpo
 - **Drag-and-drop file selection**
 - **Accept / reject handshake** — receiver sees filename, size, and sender name and approves or denies before a single byte of file data moves
 - **TLS-encrypted transfer channel** — the entire file-transfer TCP connection (handshake, control messages, and file data) is wrapped in TLS via OpenSSL. UDP discovery broadcasts remain plaintext by design — there's nothing sensitive in an "I exist" announcement
-- **High-throughput streaming** — 64 KB chunks, `TCP_NODELAY` enabled, and no per-chunk application-level acknowledgment: the sender streams continuously and relies on TCP's own transport-layer flow control plus an end-to-end SHA-256 check at completion, rather than duplicating reliability at the application layer
-- **Resumable transfers** — a `RESUME_QUERY` on connect lets an interrupted transfer pick up from the last acknowledged chunk instead of restarting from zero
+- **High-throughput streaming** — 256 KB chunks, `TCP_NODELAY` enabled, 1 MB send/receive socket buffers, and no per-chunk application-level acknowledgment: the sender streams continuously and relies on TCP's own transport-layer flow control plus an end-to-end SHA-256 check at completion, rather than duplicating reliability at the application layer
+- **Resumable, content-verified transfers** — a `RESUME_QUERY` on connect lets an interrupted transfer pick up from the last flushed chunk instead of restarting from zero. Before resuming, the sender and receiver compare a SHA-256 hash of the partial file's first chunk — if the receiver's `.part` file doesn't actually match what the sender thinks it sent, the stale partial is discarded and the transfer restarts clean rather than resuming from a corrupted offset
 - **End-to-end integrity verification** — a real, from-scratch SHA-256 implementation (FIPS 180-4), verified against known test vectors in CI on every push
 - **Sampled progress reporting** — progress events are throttled to every ~150ms rather than fired per chunk, so status updates don't become their own bottleneck at high throughput
+- **Built-in benchmarking mode** — a `--benchmark-auto-accept` flag on the receiver skips the interactive accept prompt for scripted testing, and the sender emits a machine-readable `BENCHMARK:<elapsedMs>|<fileSizeBytes>` line on completion, so throughput can be measured programmatically instead of timed by hand
 - **Structured error codes** surfaced to the UI — `PERMISSION_DENIED`, `DISK_FULL`, `CHECKSUM_MISMATCH`, `TRANSFER_REJECTED`, `RESUME_STATE_INVALID`, `PEER_DISCONNECTED`, `FILE_BUSY`, `TLS_HANDSHAKE_FAILED`
 - **Cross-platform networking core** — a platform abstraction layer isolates WinSock2 (Windows) from POSIX sockets (Linux/macOS) behind one API
 - **Transfer history** — a persisted JSON log of every transfer's peer, filename, size, timing, and outcome
@@ -74,6 +75,16 @@ Most "file sharing" side projects are a thin wrapper around an HTTP upload endpo
 
 The file-transfer TCP channel is wrapped in TLS (OpenSSL). On first run, `start.sh` generates a **self-signed certificate** for the receiving peer — this is a LAN peer-to-peer tool, not a public-facing service, so there's no public CA to validate against, and the sending peer intentionally does not verify the certificate chain (`SSL_VERIFY_NONE`). This protects against passive eavesdropping on the local network; it does not protect against an active attacker who can intercept the initial connection (a proper trust-on-first-use or pre-shared-fingerprint model would be needed for that, and is on the roadmap below). This tradeoff is documented here deliberately, not an oversight.
 
+Input validation hardening — particularly around how untrusted, peer-supplied metadata (filenames included) is handled before touching the filesystem — is an active area of work; see Roadmap.
+
+---
+
+## Performance
+
+WinDrop uses continuous streaming (no per-chunk handshake), 256 KB chunks, `TCP_NODELAY`, and 1 MB socket buffers to keep a single TCP connection as close to link-saturated as a real network allows.
+
+**Informal real-world result:** a 2.3 GB file transferred between two Linux laptops on a shared, congested college WiFi network (not a clean lab LAN) in 6 minutes 13 seconds — roughly 6.2 MB/s sustained. This is a single uncontrolled run on a public network, not a benchmark; see Roadmap for the plan to publish controlled, repeatable numbers using the built-in `--benchmark-auto-accept` / `BENCHMARK:` tooling now that it exists.
+
 ---
 
 ## Transfer Protocol
@@ -87,13 +98,15 @@ Immediately after `accept()`/`connect()`, both sides perform a TLS handshake bef
 ### 3. Resume Check + Request Handshake
 | Step | Message | Direction |
 |---|---|---|
-| Resume check | `RESUME_QUERY:id\|filename\|size` | Sender → Receiver |
+| Resume check | `RESUME_QUERY:id\|filename\|size\|firstChunkHash` | Sender → Receiver |
 | Resume reply | `RESUME_RESPONSE:OK\|lastChunk` or `RESUME_RESPONSE:NO` | Receiver → Sender |
 | Transfer request | `REQUEST:id\|filename\|size\|senderName` | Sender → Receiver |
 | User decision | `REQUEST_ACCEPT:id` or `REQUEST_REJECT:id` | Receiver → Sender |
 
+The receiver only responds `RESUME_RESPONSE:OK` if the SHA-256 hash of its own `.part` file's first chunk matches the `firstChunkHash` the sender supplied — otherwise the stale partial is discarded and the transfer starts fresh.
+
 ### 4. Streaming
-64 KB chunks are streamed continuously with no per-chunk acknowledgment — the sender relies on TCP's own flow control and checks only its own `send()` return value. The receiver tracks exact bytes received against the known total size from the handshake, buffering and flushing to disk in batches, with `.part.meta` checkpoints written only after a successful flush.
+256 KB chunks are streamed continuously with no per-chunk acknowledgment — the sender relies on TCP's own flow control and checks only its own `send()` return value. The receiver tracks exact bytes received against the known total size from the handshake, buffering and flushing to disk in 1 MB batches, with `.part.meta` checkpoints written only after a successful flush.
 
 ### 5. Finalization
 | Step | Message | Direction |
@@ -117,6 +130,8 @@ cd tests
 g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256 && ./test_sha256
 g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata && ./test_metadata
 ```
+
+Coverage that doesn't exist yet — full transfer-path integration tests (mid-transfer kill and resume, corrupted `.part` file rejection, concurrent-writer contention) — is tracked in Roadmap.
 
 ---
 
@@ -162,12 +177,19 @@ chmod +x start.sh
 
 `start.sh` generates a local self-signed TLS certificate on first run, detects your OS, compiles `core`/`sender` against the correct platform file, installs dependencies, and launches all three layers with clean shutdown on `Ctrl+C`.
 
+### Benchmarking
+The receiver can be started with `--benchmark-auto-accept` to skip the interactive accept prompt for scripted, repeatable timing runs. The sender prints a `BENCHMARK:<elapsedMs>|<fileSizeBytes>` line on completion, suitable for parsing in a test script.
+
 ---
 
 ## Roadmap
 
-- [ ] Real cross-machine throughput benchmarks (before/after the streaming redesign, and plaintext vs. TLS overhead) — pending access to a second physical machine
+- [ ] Publish controlled, repeatable throughput benchmarks across network conditions (clean LAN, congested WiFi, plaintext vs. TLS overhead) using the `--benchmark-auto-accept` / `BENCHMARK:` tooling now built into the binaries
 - [ ] Trust-on-first-use or pre-shared certificate fingerprint, to harden the TLS trust model beyond "any cert is accepted"
+- [ ] Harden validation of peer-supplied metadata (filenames included) before it touches the filesystem
+- [ ] Decouple disk writes from the network receive loop (dedicated writer thread + queue) so a slow disk can't stall the socket read and throttle throughput
+- [ ] Parallel-stream transfer mode, to recover throughput on lossy/high-latency networks where a single TCP connection's congestion control caps well below link capacity
+- [ ] Integration tests for the transfer path itself: mid-transfer kill + resume, corrupted `.part` file rejection, concurrent-writer contention
 - [ ] Folder / multi-file transfer
 - [ ] Bandwidth throttling
 - [ ] Guard against two concurrent inbound transfers writing to the same destination filename
