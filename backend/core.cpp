@@ -38,6 +38,11 @@ mutex requests_mutex;
 // --- GAP 4: Single-Writer Guard Globals ---
 set<string> active_writes;
 mutex writes_mutex;
+
+// Only for scripted benchmarking (--benchmark-auto-accept) -- bypasses the
+// interactive accept/reject prompt so automated multi-run tests don't need
+// a human clicking Accept each time. Never set true in normal usage.
+bool g_benchmarkAutoAccept = false;
 // ------------------------------------------
 
 // Shared session ID: generated once in main() before threads start,
@@ -257,8 +262,17 @@ void handle_client(int new_socket)
         }
 
         unique_lock state_lock(state->mtx);
-        state->cv.wait(state_lock, [&]
-                       { return state->decision_made; });
+        if (g_benchmarkAutoAccept)
+        {
+            state->decision_made = true;
+            state->accepted = true;
+            cout << "AUTO-ACCEPTED (benchmark mode): " << id << endl;
+        }
+        else
+        {
+            state->cv.wait(state_lock, [&]
+                           { return state->decision_made; });
+        }
 
         if (state->accepted)
         {
@@ -453,8 +467,16 @@ void run_tcp_server()
     Net::closeSocket(server_fd);
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    for (int i = 1; i < argc; ++i)
+    {
+        if (string(argv[i]) == "--benchmark-auto-accept")
+        {
+            g_benchmarkAutoAccept = true;
+            cout << "⚠️  Benchmark mode: auto-accepting all incoming transfers. Do not use outside of controlled testing." << endl;
+        }
+    }
 
     Net::init();
     setvbuf(stdout, NULL, _IONBF, 0);

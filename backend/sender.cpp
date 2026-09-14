@@ -175,6 +175,7 @@ int main(int argc, char *argv[])
             (long long)lastChunk * CHUNK_SIZE;
 
         auto lastReport = chrono::steady_clock::now();
+        auto transferStart = chrono::steady_clock::now();
 
         while (infile.read(fileBuffer, sizeof(fileBuffer)) ||
                infile.gcount() > 0)
@@ -242,6 +243,11 @@ int main(int argc, char *argv[])
 
             if (final_resp.find("DELIVERED_ACK") == 0)
             {
+                auto transferEnd = chrono::steady_clock::now();
+                long long elapsedMs = chrono::duration_cast<chrono::milliseconds>(
+                                          transferEnd - transferStart)
+                                          .count();
+                cout << "BENCHMARK:" << elapsedMs << "|" << fileSize << endl;
                 cout << "🌟 SUCCESS: File delivered and verified!"
                      << endl;
             }
