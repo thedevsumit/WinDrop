@@ -1,6 +1,7 @@
 #ifndef NET_PLATFORM_H
 #define NET_PLATFORM_H
-
+#include <sstream>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include <openssl/ssl.h>
