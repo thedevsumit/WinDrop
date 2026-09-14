@@ -18,7 +18,7 @@ RESULTS_FILE="../BENCHMARKS.md"
 
 echo "# WinDrop Benchmark Results" > "$RESULTS_FILE"
 echo "" >> "$RESULTS_FILE"
-echo "Network: NITJ WiFi | Date: $(date)" >> "$RESULTS_FILE"
+echo "Network: NITJ_E_BLOCK | Date: $(date)" >> "$RESULTS_FILE"
 echo "" >> "$RESULTS_FILE"
 echo "| File Size | Trial | Time (s) | Throughput (MB/s) |" >> "$RESULTS_FILE"
 echo "|---|---|---|---|" >> "$RESULTS_FILE"
