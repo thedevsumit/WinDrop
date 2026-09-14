@@ -95,6 +95,20 @@ jobs:
         run: |
           g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata.exe
           ./test_metadata.exe
+            - name: Build and run path sanitization tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_path_utils.cpp -o test_path_utils
+          ./test_path_utils
+
+      - name: Build and run path sanitization tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: tests
+        shell: msys2 {0}
+        run: |
+          g++ -std=c++17 -I../backend test_path_utils.cpp -o test_path_utils.exe
+          ./test_path_utils.exe
 
   node-syntax:
     name: Backend JS syntax check

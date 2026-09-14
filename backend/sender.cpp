@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
-
+#include "trust_store.h"
 #include "sha256.h"
 #include "net_platform.h"
 
@@ -73,6 +73,26 @@ int main(int argc, char *argv[])
         return 1;
     }
     // Resume Support
+    string fingerprint = Net::getPeerCertFingerprint(ssl);
+    auto known = WinDrop::loadTrustStore();
+    auto it = known.find(target_ip);
+
+    if (it == known.end())
+    {
+        // First time seeing this peer — trust on first use, and remember it.
+        cout << "🔑 New peer, trusting on first connection: " << fingerprint.substr(0, 16) << "..." << endl;
+        WinDrop::trustPeer(target_ip, fingerprint);
+    }
+    else if (it->second != fingerprint)
+    {
+        // Fingerprint changed since last time — this is exactly what an
+        // active MITM looks like. Refuse to proceed.
+        cerr << "⚠️  WARNING: certificate for " << target_ip
+             << " does NOT match the one seen previously. Possible MITM. Aborting." << endl;
+        cout << "ERROR:CERT_MISMATCH|" << requestId << endl;
+        Net::closeTLS(ssl, sock);
+        return 1;
+    }
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
 

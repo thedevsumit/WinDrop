@@ -7,36 +7,37 @@
 #include <openssl/err.h>
 #include <cstddef>
 #ifdef _WIN32
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    typedef SOCKET socket_t;
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET socket_t;
 #else
-    #include <sys/socket.h>
-    #include <arpa/inet.h>
-    #include <unistd.h>
-    #include <netinet/in.h>
-    typedef int socket_t;
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netinet/in.h>
+typedef int socket_t;
 #endif
 
-namespace Net {
+namespace Net
+{
     // Lifecycle
     socket_t createSocket(int type);
     void closeSocket(socket_t fd);
 
     // Data Transfer (Plaintext)
-    int sendData(socket_t fd, const void* buf, size_t len);
-    int sendTo(socket_t fd, const void* buf, size_t len, const struct sockaddr_in* addr);
-    int recvData(socket_t fd, void* buf, size_t len);
+    int sendData(socket_t fd, const void *buf, size_t len);
+    int sendTo(socket_t fd, const void *buf, size_t len, const struct sockaddr_in *addr);
+    int recvData(socket_t fd, void *buf, size_t len);
 
     void setReuseAddr(socket_t fd);
     void enableBroadcast(socket_t fd);
-    void joinMulticastGroup(socket_t fd, const char* group);
-    void setMulticastInterface(socket_t fd, const char* localIp);
+    void joinMulticastGroup(socket_t fd, const char *group);
+    void setMulticastInterface(socket_t fd, const char *localIp);
     void setNoDelay(socket_t fd);
     void setSocketBufferSize(socket_t fd, int bytes);
     // Addressing
-    int inetPton(const char* ip, struct sockaddr_in* addr);
-    std::string inetNton(struct sockaddr_in* addr);
+    int inetPton(const char *ip, struct sockaddr_in *addr);
+    std::string inetNton(struct sockaddr_in *addr);
 
     // Utility
     std::string getLocalIP();
@@ -48,13 +49,13 @@ namespace Net {
     // --- TLS Abstractions ---
 
     // Initialize OpenSSL context for the receiving peer (Core)
-    inline SSL_CTX* createServerTLSContext(const char* certFile, const char* keyFile)
+    inline SSL_CTX *createServerTLSContext(const char *certFile, const char *keyFile)
     {
         SSL_load_error_strings();
         OpenSSL_add_ssl_algorithms();
-        
-        const SSL_METHOD* method = TLS_server_method();
-        SSL_CTX* ctx = SSL_CTX_new(method);
+
+        const SSL_METHOD *method = TLS_server_method();
+        SSL_CTX *ctx = SSL_CTX_new(method);
         if (!ctx)
         {
             ERR_print_errors_fp(stderr);
@@ -72,13 +73,13 @@ namespace Net {
     }
 
     // Initialize OpenSSL context for the sending peer
-    inline SSL_CTX* createClientTLSContext()
+    inline SSL_CTX *createClientTLSContext()
     {
         SSL_load_error_strings();
         OpenSSL_add_ssl_algorithms();
 
-        const SSL_METHOD* method = TLS_client_method();
-        SSL_CTX* ctx = SSL_CTX_new(method);
+        const SSL_METHOD *method = TLS_client_method();
+        SSL_CTX *ctx = SSL_CTX_new(method);
         if (!ctx)
         {
             ERR_print_errors_fp(stderr);
@@ -91,9 +92,9 @@ namespace Net {
     }
 
     // Wrap accepted raw TCP socket in TLS server handshake
-    inline SSL* tlsAccept(socket_t sock, SSL_CTX* ctx)
+    inline SSL *tlsAccept(socket_t sock, SSL_CTX *ctx)
     {
-        SSL* ssl = SSL_new(ctx);
+        SSL *ssl = SSL_new(ctx);
         SSL_set_fd(ssl, (int)sock);
         if (SSL_accept(ssl) <= 0)
         {
@@ -105,9 +106,9 @@ namespace Net {
     }
 
     // Wrap connected raw TCP socket in TLS client handshake
-    inline SSL* tlsConnect(socket_t sock, SSL_CTX* ctx)
+    inline SSL *tlsConnect(socket_t sock, SSL_CTX *ctx)
     {
-        SSL* ssl = SSL_new(ctx);
+        SSL *ssl = SSL_new(ctx);
         SSL_set_fd(ssl, (int)sock);
         if (SSL_connect(ssl) <= 0)
         {
@@ -119,19 +120,19 @@ namespace Net {
     }
 
     // Overloaded TLS write (matches plaintext signature style)
-    inline int sendData(SSL* ssl, const void* buf, size_t len)
+    inline int sendData(SSL *ssl, const void *buf, size_t len)
     {
         return SSL_write(ssl, buf, (int)len);
     }
 
     // Overloaded TLS read (matches plaintext signature style)
-    inline int recvData(SSL* ssl, void* buf, size_t len)
+    inline int recvData(SSL *ssl, void *buf, size_t len)
     {
         return SSL_read(ssl, buf, (int)len);
     }
 
     // Gracefully terminate TLS session and close underlying socket
-    inline void closeTLS(SSL* ssl, socket_t sock)
+    inline void closeTLS(SSL *ssl, socket_t sock)
     {
         if (ssl)
         {
@@ -139,6 +140,22 @@ namespace Net {
             SSL_free(ssl);
         }
         closeSocket(sock);
+    }
+    std::string getPeerCertFingerprint(SSL *ssl)
+    {
+        X509 *cert = SSL_get_peer_certificate(ssl);
+        if (!cert)
+            return "";
+
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digest_len = 0;
+        X509_digest(cert, EVP_sha256(), digest, &digest_len);
+        X509_free(cert);
+
+        std::ostringstream oss;
+        for (unsigned int i = 0; i < digest_len; i++)
+            oss << std::hex << std::setw(2) << std::setfill('0') << (int)digest[i];
+        return oss.str();
     }
 }
 

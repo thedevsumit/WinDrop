@@ -13,7 +13,7 @@
 #include "sha256.h"
 #include "net_platform.h"
 #include "metadata.h"
-
+#include "path_utils.h"
 using namespace std;
 
 const int CHUNK_SIZE = 262144; // 256 KB read/recv buffer per call
@@ -55,26 +55,7 @@ string my_session_id;
 // directory (e.g. "../../etc/passwd" or a bare ".."). Every filename that
 // arrives over the network — in both REQUEST and RESUME_QUERY — must be
 // passed through this before it's ever used in a filesystem path.
-string sanitizeFilename(const string &raw)
-{
-    // Strip any path components — keep only what's after the last slash,
-    // handling both '/' (POSIX) and '\' (Windows) separators.
-    size_t pos = raw.find_last_of("/\\");
-    string base = (pos == string::npos) ? raw : raw.substr(pos + 1);
 
-    // Reject empty, current-dir, or parent-dir references outright.
-    if (base.empty() || base == "." || base == "..")
-        return "unnamed_file";
-
-    // Defense in depth: even after stripping path separators, refuse
-    // anything that still contains ".." as a substring (covers oddities
-    // like "..\x00" or encoded traversal attempts that a naive split
-    // might not catch on some platforms).
-    if (base.find("..") != string::npos)
-        return "unnamed_file";
-
-    return base;
-}
 string getLocalIP()
 {
     return Net::getLocalIP();
@@ -208,7 +189,7 @@ void handle_client(int new_socket)
     if (pos1 != string::npos && pos2 != string::npos && pos3 != string::npos)
     {
         string resumeId = payload.substr(0, pos1);
-        string filename = sanitizeFilename(payload.substr(pos1 + 1, pos2 - pos1 - 1));
+        string filename = WinDrop::sanitizeFilename(payload.substr(pos1 + 1, pos2 - pos1 - 1));
         long long size = stoll(payload.substr(pos2 + 1, pos3 - pos2 - 1));
         string senderPrefixHash = payload.substr(pos3 + 1);
         while (!senderPrefixHash.empty() && (senderPrefixHash.back() == '\n' || senderPrefixHash.back() == '\r'))
@@ -282,7 +263,7 @@ void handle_client(int new_socket)
         }
 
         string id = parts[0];
-        string filename = sanitizeFilename(parts[1]);
+        string filename = WinDrop::sanitizeFilename(parts[1]);
         string size_str = parts[2];
         string sender = parts[3];
         if (!sender.empty() && sender.back() == '\n')
