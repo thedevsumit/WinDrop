@@ -36,6 +36,7 @@ namespace Net
     void setMulticastInterface(socket_t fd, const char *localIp);
     void setNoDelay(socket_t fd);
     void setSocketBufferSize(socket_t fd, int bytes);
+    std::string getPeerCertFingerprint(ssl_st* ssl);
     // Addressing
     int inetPton(const char *ip, struct sockaddr_in *addr);
     std::string inetNton(struct sockaddr_in *addr);
