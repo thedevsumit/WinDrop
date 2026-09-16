@@ -185,14 +185,11 @@ The receiver can be started with `--benchmark-auto-accept` to skip the interacti
 ## Roadmap
 
 - [ ] Publish controlled, repeatable throughput benchmarks across network conditions (clean LAN, congested WiFi, plaintext vs. TLS overhead) using the `--benchmark-auto-accept` / `BENCHMARK:` tooling now built into the binaries
-- [ ] Trust-on-first-use or pre-shared certificate fingerprint, to harden the TLS trust model beyond "any cert is accepted"
-- [ ] Harden validation of peer-supplied metadata (filenames included) before it touches the filesystem
 - [ ] Decouple disk writes from the network receive loop (dedicated writer thread + queue) so a slow disk can't stall the socket read and throttle throughput
 - [ ] Parallel-stream transfer mode, to recover throughput on lossy/high-latency networks where a single TCP connection's congestion control caps well below link capacity
 - [ ] Integration tests for the transfer path itself: mid-transfer kill + resume, corrupted `.part` file rejection, concurrent-writer contention
 - [ ] Folder / multi-file transfer
 - [ ] Bandwidth throttling
-- [ ] Guard against two concurrent inbound transfers writing to the same destination filename
 
 ---
 
