@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,10 @@ jobs:
       - name: Install OpenSSL (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install openssl@3
 
       - name: Set up MSYS2 (Windows only)
         if: runner.os == 'Windows'
@@ -36,6 +40,23 @@ jobs:
           g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_posix.cpp -o core -lssl -lcrypto
           g++ -std=c++17 sender.cpp sha256.cpp net_platform_posix.cpp -o sender -lssl -lcrypto
 
+      - name: Build core + sender (macOS)
+        if: runner.os == 'macOS'
+        working-directory: backend
+        # Homebrew's OpenSSL isn't on the default compiler search path on
+        # either Apple Silicon (/opt/homebrew) or Intel (/usr/local), so the
+        # include/lib paths have to be resolved explicitly. This mirrors the
+        # exact recipe start.sh already uses locally.
+        run: |
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          echo "Using OpenSSL from: $OPENSSL_PREFIX"
+          g++ -pthread -std=c++17 core.cpp sha256.cpp net_platform_posix.cpp \
+              -I"$OPENSSL_PREFIX/include" -L"$OPENSSL_PREFIX/lib" \
+              -o core -lssl -lcrypto
+          g++ -std=c++17 sender.cpp sha256.cpp net_platform_posix.cpp \
+              -I"$OPENSSL_PREFIX/include" -L"$OPENSSL_PREFIX/lib" \
+              -o sender -lssl -lcrypto
+
       - name: Build core + sender (Windows)
         if: runner.os == 'Windows'
         working-directory: backend
@@ -49,7 +70,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +78,10 @@ jobs:
       - name: Install OpenSSL (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install openssl@3
 
       - name: Set up MSYS2 (Windows only)
         if: runner.os == 'Windows'
@@ -68,6 +93,13 @@ jobs:
 
       - name: Build and run SHA-256 tests (Linux)
         if: runner.os == 'Linux'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256
+          ./test_sha256
+
+      - name: Build and run SHA-256 tests (macOS)
+        if: runner.os == 'macOS'
         working-directory: tests
         run: |
           g++ -std=c++17 -I../backend test_sha256.cpp ../backend/sha256.cpp -o test_sha256
@@ -88,6 +120,13 @@ jobs:
           g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata
           ./test_metadata
 
+      - name: Build and run metadata/resume tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_metadata.cpp -o test_metadata
+          ./test_metadata
+
       - name: Build and run metadata/resume tests (Windows)
         if: runner.os == 'Windows'
         working-directory: tests
@@ -103,6 +142,13 @@ jobs:
           g++ -std=c++17 -I../backend test_path_utils.cpp -o test_path_utils
           ./test_path_utils
 
+      - name: Build and run path sanitization tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: tests
+        run: |
+          g++ -std=c++17 -I../backend test_path_utils.cpp -o test_path_utils
+          ./test_path_utils
+
       - name: Build and run path sanitization tests (Windows)
         if: runner.os == 'Windows'
         working-directory: tests
@@ -110,6 +156,37 @@ jobs:
         run: |
           g++ -std=c++17 -I../backend test_path_utils.cpp -o test_path_utils.exe
           ./test_path_utils.exe
+
+  integration-tests:
+    name: Run integration tests (Linux)
+    runs-on: ubuntu-latest
+    # Linux-only for now: these scripts use mkfifo and GNU-coreutils-specific
+    # `stat -c%s` syntax that differs on macOS's BSD stat (`-f%z`), and they
+    # haven't been verified on macOS or under MSYS2 yet. Broadening this to
+    # other platforms is tracked in the Roadmap rather than assumed to work.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Run resume-after-kill test
+        working-directory: tests/integration
+        run: |
+          chmod +x test_resume_kill.sh
+          ./test_resume_kill.sh
+
+      - name: Run corrupted-part-file rejection test
+        working-directory: tests/integration
+        run: |
+          chmod +x test_corrupted_resume.sh
+          ./test_corrupted_resume.sh
+
+      - name: Run same-filename concurrent-writer test
+        working-directory: tests/integration
+        run: |
+          chmod +x test_same_filename.sh
+          ./test_same_filename.sh
 
   node-syntax:
     name: Backend JS syntax check
