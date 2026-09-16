@@ -1,2 +1,31 @@
 .vscode/
 backend/*.pem
+
+# Compiled C++ binaries — these are build artifacts, not source. They get
+# rebuilt fresh by start.sh / CI on every run, so committing them just bloats
+# the repo and can't be code-reviewed the way source can.
+backend/core
+backend/sender
+backend/*.exe
+backend/*.o
+
+tests/test_sha256
+tests/test_metadata
+tests/test_path_utils
+tests/*.exe
+tests/*.o
+
+tests/integration/core_test
+tests/integration/sender_test
+tests/integration/*.pem
+tests/integration/known_peers.txt
+
+# Node
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# Runtime artifacts that should never be committed
+*.part
+*.part.meta
+known_peers.txt
