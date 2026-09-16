@@ -21,6 +21,8 @@ rm -f known_peers.txt core_stress.log sender_*.log file_*.bin
 ./core_test --benchmark-auto-accept < /dev/null > core_stress.log 2>&1 &
 CORE_PID=$!
 sleep 1
+BASELINE_FDS=$(ls /proc/$CORE_PID/fd 2>/dev/null | wc -l)
+echo "Baseline FDs before load: $BASELINE_FDS"
 
 echo "Launching 25 concurrent transfers..."
 declare -a SENDER_PIDS
@@ -47,7 +49,8 @@ for i in $(seq 1 25); do
     fi
 done
 
-echo "Open file descriptors held by core process: $(ls /proc/$CORE_PID/fd 2>/dev/null | wc -l)"
+AFTER_FDS=$(ls /proc/$CORE_PID/fd 2>/dev/null | wc -l)
+echo "FDs after load: $AFTER_FDS (delta: $((AFTER_FDS - BASELINE_FDS)))"
 kill -9 $CORE_PID 2>/dev/null
 
 if [ $FAILURES -eq 0 ]; then

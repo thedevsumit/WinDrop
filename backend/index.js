@@ -195,6 +195,7 @@ coreEngine.stdout.on('data', (data) => {
             const errorMessages = {
                 'CHECKSUM_MISMATCH': 'The received file is corrupted.',
                 'DISK_FULL': 'Receiver disk is full.',
+                'CERT_MISMATCH': 'This peer\'s security certificate has changed since you last connected — possible security risk. Transfer blocked.',
                 'TLS_HANDSHAKE_FAILED': 'Could not establish a secure connection to the peer.',
                 'PERMISSION_DENIED': 'Receiver could not write the file.',
                 'TRANSFER_REJECTED': 'The transfer was rejected.',
@@ -374,6 +375,7 @@ app.post('/send', upload.single('file'), (req, res) => {
                 const [code, id] = rawError.split('|');
 
                 const errorMessages = {
+                    'CERT_MISMATCH': 'This peer\'s security certificate has changed since you last connected — possible security risk. Transfer blocked.',
                     'TLS_HANDSHAKE_FAILED': 'Could not establish a secure connection to the peer.',
                     'CHECKSUM_MISMATCH': 'The received file is corrupted.',
                     'DISK_FULL': 'Receiver disk is full.',
