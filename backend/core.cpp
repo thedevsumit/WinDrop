@@ -101,7 +101,7 @@ void run_udp_listener()
     listen_addr.sin_port = htons(8888);
     listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0)
+    if (::bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0)
     {
         cerr << "[listener] bind failed — port 8888 may be in use" << endl;
     }
@@ -487,7 +487,7 @@ void run_tcp_server()
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(8080);
-    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    ::bind(server_fd, (struct sockaddr *)&address, sizeof(address));
     listen(server_fd, 5);
     while (true)
     {
