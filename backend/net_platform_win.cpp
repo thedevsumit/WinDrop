@@ -57,6 +57,11 @@ namespace Net
         setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char *)&broadcast, sizeof(broadcast));
     }
 
+    void setRecvTimeout(socket_t fd, int seconds)
+    {
+        DWORD timeoutMs = (DWORD)seconds * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
+    }
     void joinMulticastGroup(socket_t fd, const char *group)
     {
         struct ip_mreq mreq;

@@ -1,5 +1,6 @@
 #include "net_platform.h"
 #include <iostream>
+#include <sys/time.h>
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <cstring>
@@ -66,6 +67,13 @@ namespace Net
         struct in_addr localInterface;
         localInterface.s_addr = inet_addr(localIp);
         setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &localInterface, sizeof(localInterface));
+    }
+    void setRecvTimeout(socket_t fd, int seconds)
+    {
+        struct timeval tv;
+        tv.tv_sec = seconds;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
     int inetPton(const char *ip, struct sockaddr_in *addr)

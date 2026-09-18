@@ -186,10 +186,8 @@ coreEngine.stdout.on('data', (data) => {
             });
 
         } else if (line.startsWith('ERROR:')) {
-
             // Generic error parser for Core Engine
             const rawError = line.substring(6).trim();
-
             const [code, id] = rawError.split('|');
 
             const errorMessages = {
@@ -216,7 +214,6 @@ coreEngine.stdout.on('data', (data) => {
                 code,
                 message
             });
-
             if (id) {
                 const history = loadHistory();
 
@@ -231,30 +228,24 @@ coreEngine.stdout.on('data', (data) => {
             }
 
         } else if (line.trim().length > 0) {
-
             console.log(`⚙️ [C++] ${line.trim()}`);
         }
     });
 });
-
 coreEngine.on('error', (err) => {
     console.error(
         '❌ Failed to start C++ Core Engine. Did you compile it?',
         err.message
     );
 });
-
 // --- TRANSFER DECISION ROUTE ---
 app.post('/transfer/decision', (req, res) => {
-
     const { id, decision } = req.body;
-
     if (!id || !decision) {
         return res.status(400).json({
             error: "id and decision required"
         });
     }
-
     // IMPORTANT:
     // Use the SAME transfer ID received from the frontend/core.
     // This ID is also used by the wire protocol.

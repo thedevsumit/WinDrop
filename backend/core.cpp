@@ -162,6 +162,7 @@ void handle_client(int new_socket)
     socket_t sock = (socket_t)new_socket;
     Net::setNoDelay(sock);
     Net::setSocketBufferSize(sock, 1 << 20);
+    Net::setRecvTimeout(sock, 60); 
     SSL *ssl = Net::tlsAccept(sock, g_server_tls_ctx);
     if (!ssl)
     {
