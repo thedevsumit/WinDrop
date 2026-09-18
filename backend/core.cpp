@@ -30,6 +30,12 @@ struct RequestState
     bool accepted = false;
     condition_variable cv;
     mutex mtx;
+
+    // Folder-transfer fields — unused (default) for a plain single-file REQUEST.
+    bool isFolder = false;
+    string folderName;
+    int fileCount = 0;
+    vector<pair<string, long long>> manifest;
 };
 
 map<string, shared_ptr<RequestState>> pending_requests;
@@ -150,7 +156,7 @@ void run_stdin_listener()
             {
                 lock_guard state_lock(state->mtx);
                 state->decision_made = true;
-                state->accepted = (command == "REQUEST_ACCEPT");
+                state->accepted = (command == "REQUEST_ACCEPT" || command == "FOLDER_ACCEPT");
             }
             state->cv.notify_one();
         }
@@ -244,6 +250,135 @@ void handle_client(int new_socket)
     }
     raw_data = string(buffer, bytes_read);
 }
+
+    if (raw_data.find("FOLDER_REQUEST:") == 0)
+    {
+        string payload = raw_data.substr(15);
+        vector<string> parts;
+        size_t pos = 0;
+        while ((pos = payload.find('|')) != string::npos)
+        {
+            parts.push_back(payload.substr(0, pos));
+            payload.erase(0, pos + 1);
+        }
+        parts.push_back(payload);
+
+        if (parts.size() < 5)
+        {
+            Net::closeTLS(ssl, sock);
+            return;
+        }
+
+        string id = parts[0];
+        string folderName = WinDrop::sanitizeFilename(parts[1]); // basename-only is correct here, this is a display name, not a path
+        int fileCount = 0;
+        try { fileCount = stoi(parts[2]); } catch (...) { fileCount = 0; }
+        string totalSizeStr = parts[3];
+        string sender = parts[4];
+        while (!sender.empty() && (sender.back() == '\n' || sender.back() == '\r'))
+            sender.pop_back();
+
+        // The manifest is sent as a second message, same pattern RESUME_QUERY
+        // uses for its follow-up REQUEST — read it now, before deciding
+        // anything about this folder request.
+        memset(buffer, 0, CHUNK_SIZE);
+        bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+        if (bytes_read <= 0)
+        {
+            Net::closeTLS(ssl, sock);
+            return;
+        }
+        string manifestMsg(buffer, bytes_read);
+
+        auto state = make_shared<RequestState>();
+        state->socket = (int)sock;
+        state->id = id;
+        state->isFolder = true;
+        state->folderName = folderName;
+        state->fileCount = fileCount;
+        state->sender = sender;
+        try { state->size = stoll(totalSizeStr); } catch (...) { state->size = 0; }
+
+        if (manifestMsg.find("FILE_MANIFEST:") == 0)
+        {
+            string entries = manifestMsg.substr(14);
+            while (!entries.empty() && (entries.back() == '\n' || entries.back() == '\r'))
+                entries.pop_back();
+
+            size_t epos = 0;
+            while ((epos = entries.find(';')) != string::npos)
+            {
+                string entry = entries.substr(0, epos);
+                entries.erase(0, epos + 1);
+                size_t sepPos = entry.find('|');
+                if (sepPos != string::npos)
+                {
+                    string relPath = WinDrop::sanitizeRelativePath(entry.substr(0, sepPos));
+                    long long fSize = 0;
+                    try { fSize = stoll(entry.substr(sepPos + 1)); } catch (...) { fSize = 0; }
+                    state->manifest.push_back({relPath, fSize});
+                }
+            }
+            // Handle the final entry (no trailing semicolon)
+            if (!entries.empty())
+            {
+                size_t sepPos = entries.find('|');
+                if (sepPos != string::npos)
+                {
+                    string relPath = WinDrop::sanitizeRelativePath(entries.substr(0, sepPos));
+                    long long fSize = 0;
+                    try { fSize = stoll(entries.substr(sepPos + 1)); } catch (...) { fSize = 0; }
+                    state->manifest.push_back({relPath, fSize});
+                }
+            }
+        }
+
+        cout << "INCOMING_FOLDER_REQUEST:" << id << "|" << folderName << "|"
+             << fileCount << "|" << totalSizeStr << "|" << sender
+             << "|filesParsed=" << state->manifest.size() << endl;
+
+        {
+            lock_guard lock(requests_mutex);
+            pending_requests[id] = state;
+        }
+
+        unique_lock state_lock(state->mtx);
+        if (g_benchmarkAutoAccept)
+        {
+            state->decision_made = true;
+            state->accepted = true;
+            cout << "AUTO-ACCEPTED (benchmark mode): " << id << endl;
+        }
+        else
+        {
+            state->cv.wait(state_lock, [&] { return state->decision_made; });
+        }
+
+        if (state->accepted)
+        {
+            string resp = "FOLDER_ACCEPT:" + id + "\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
+            cout << "FOLDER_ACCEPTED:" << id << "|filesToReceive=" << state->manifest.size() << endl;
+            // Phase 3 hooks in here: instead of closing the connection, loop
+            // over state->manifest and handle a REQUEST/RESUME_QUERY/stream
+            // cycle per file on this same ssl connection, reusing the
+            // existing single-file logic below unchanged. Phase 1 stops here
+            // so the handshake itself can be verified in isolation first.
+        }
+        else
+        {
+            string resp = "FOLDER_REJECT:" + id + "\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
+            cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
+        }
+
+        {
+            lock_guard lock(requests_mutex);
+            pending_requests.erase(id);
+        }
+        Net::closeTLS(ssl, sock);
+        return;
+    }
 
     if (raw_data.find("REQUEST:") == 0)
     {

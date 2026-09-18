@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
+#include <filesystem>
 #include "trust_store.h"
 #include "sha256.h"
 #include "net_platform.h"
 
+namespace fs = std::filesystem;
 using namespace std;
 
 const int CHUNK_SIZE = 262144;
@@ -17,6 +19,24 @@ long long getFileSize(const string &filePath)
 {
     ifstream in(filePath, ios::binary | ios::ate);
     return in.tellg();
+}
+
+// Walks folderPath recursively and returns {relativePath, sizeInBytes} for
+// every regular file found. Paths are normalized to forward slashes so the
+// wire format is identical regardless of which OS the sender runs on.
+vector<pair<string, long long>> buildManifest(const string &folderPath)
+{
+    vector<pair<string, long long>> manifest;
+    for (const auto &entry : fs::recursive_directory_iterator(folderPath))
+    {
+        if (entry.is_regular_file())
+        {
+            string relPath = fs::relative(entry.path(), folderPath).string();
+            for (auto &c : relPath) if (c == '\\') c = '/';
+            manifest.push_back({relPath, (long long)fs::file_size(entry.path())});
+        }
+    }
+    return manifest;
 }
 
 int main(int argc, char *argv[])
@@ -32,6 +52,7 @@ int main(int argc, char *argv[])
     string target_ip = argv[1];
     string file_path = argv[2];
     string requestId = argv[3];
+    bool isFolderMode = (argc >= 5 && string(argv[4]) == "--folder");
 
     socket_t sock = Net::createSocket(SOCK_STREAM);
 
@@ -93,6 +114,69 @@ int main(int argc, char *argv[])
         Net::closeTLS(ssl, sock);
         return 1;
     }
+
+    if (isFolderMode)
+    {
+        // file_path is actually a folder path in this mode.
+        auto manifest = buildManifest(file_path);
+        long long totalSize = 0;
+        for (auto &entry : manifest) totalSize += entry.second;
+        string folderName = fs::path(file_path).filename().string();
+        if (folderName.empty()) folderName = "folder"; // path had a trailing slash
+
+        char hostname[256];
+        if (gethostname(hostname, sizeof(hostname)) != 0)
+            strcpy(hostname, "Unknown_Peer");
+        string senderName(hostname);
+
+        string folderReq = "FOLDER_REQUEST:" + requestId + "|" + folderName + "|" +
+                            to_string(manifest.size()) + "|" + to_string(totalSize) + "|" +
+                            senderName + "\n";
+        Net::sendData(ssl, folderReq.c_str(), folderReq.length());
+
+        string manifestMsg = "FILE_MANIFEST:";
+        for (size_t i = 0; i < manifest.size(); i++)
+        {
+            if (i > 0) manifestMsg += ";";
+            manifestMsg += manifest[i].first + "|" + to_string(manifest[i].second);
+        }
+        manifestMsg += "\n";
+        Net::sendData(ssl, manifestMsg.c_str(), manifestMsg.length());
+
+        cout << "📦 Sent folder request: " << manifest.size() << " files, "
+             << totalSize << " bytes total. Waiting for acceptance..." << endl;
+
+        char folderBuffer[65536];
+        memset(folderBuffer, 0, sizeof(folderBuffer));
+        int folderBytes = Net::recvData(ssl, folderBuffer, sizeof(folderBuffer) - 1);
+        if (folderBytes <= 0)
+        {
+            cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+            Net::closeTLS(ssl, sock);
+            Net::cleanup();
+            return 1;
+        }
+        string folderResp(folderBuffer, folderBytes);
+
+        if (folderResp.find("FOLDER_ACCEPT:" + requestId) == 0)
+        {
+            cout << "✅ Folder transfer accepted! (" << manifest.size()
+                 << " files — per-file streaming lands in Phase 3)" << endl;
+            // Phase 3: loop over `manifest` here, sending a REQUEST per file
+            // over this same `ssl` connection, reusing the existing
+            // single-file send loop below unchanged.
+        }
+        else
+        {
+            cout << "ERROR:TRANSFER_REJECTED|" << requestId << endl;
+        }
+
+        Net::closeTLS(ssl, sock);
+        SSL_CTX_free(client_tls_ctx);
+        Net::cleanup();
+        return 0;
+    }
+
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
     long long fileSize = getFileSize(file_path);
 
