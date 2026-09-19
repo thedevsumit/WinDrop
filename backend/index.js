@@ -200,14 +200,28 @@ coreEngine.stdout.on('data', (data) => {
         } else if (line.includes('FOLDER_TRANSFER_COMPLETE:')) {
 
             const payload = line.split('FOLDER_TRANSFER_COMPLETE:')[1].trim();
-            const [id, receivedPart, totalPart] = payload.split('|');
-            const received = parseInt(receivedPart.split('=')[1]);
-            const total = parseInt(totalPart.split('=')[1]);
+            const fields = payload.split('|');
+            const id = fields[0];
+
+            // Read each field by its key rather than by position -- the
+            // wire format grew a "failed=" field between "received=" and
+            // "total=", and parsing by position silently mis-read "total"
+            // as the failed count for every folder transfer, including
+            // fully successful ones.
+            let received = 0, failed = 0, total = 0;
+            for (let i = 1; i < fields.length; i++) {
+                const [key, value] = fields[i].split('=');
+                if (key === 'received') received = parseInt(value);
+                else if (key === 'failed') failed = parseInt(value);
+                else if (key === 'total') total = parseInt(value);
+            }
 
             const history = loadHistory();
             const idx = history.findIndex(t => t.id === id);
             if (idx !== -1) {
-                history[idx].status = received === total ? 'success' : 'partial';
+                history[idx].status = (failed === 0 && received === total) ? 'success' : 'partial';
+                history[idx].filesReceived = received;
+                history[idx].filesFailed = failed;
                 history[idx].endTime = new Date().toISOString();
                 saveHistory(history);
             }
@@ -215,8 +229,9 @@ coreEngine.stdout.on('data', (data) => {
             io.emit('folder-progress', {
                 id,
                 filesCompleted: received,
+                filesFailed: failed,
                 fileCount: total,
-                status: received === total ? 'completed' : 'partial'
+                status: (failed === 0 && received === total) ? 'completed' : 'partial'
             });
 
             folderReceiveState.delete(id);
