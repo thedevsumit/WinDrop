@@ -35,6 +35,13 @@ struct RequestState
     // Folder-transfer fields — unused (default) for a plain single-file REQUEST.
     bool isFolder = false;
     string folderName;
+    // Every file inside this folder transfer is written under this
+    // subdirectory rather than directly into the working directory. Without
+    // this, two different folder transfers (or the same folder received
+    // twice) that happen to share any relative file path would silently
+    // overwrite each other on disk -- the folder's own display name alone
+    // isn't guaranteed unique, so this combines it with the transfer's id.
+    string folderNamespace;
     int fileCount = 0;
     vector<pair<string, long long>> manifest;
 };
@@ -162,7 +169,7 @@ void run_stdin_listener()
 // sends the appropriate RESUME_RESPONSE. Used both for a standalone
 // single-file transfer and, unchanged, for each file inside a folder
 // transfer's per-file loop.
-void handleResumeQuery(SSL *ssl, const string &raw_data)
+void handleResumeQuery(SSL *ssl, const string &raw_data, const string &namespacePrefix = "")
 {
     string payload = raw_data.substr(13);
     size_t pos1 = payload.find('|');
@@ -173,6 +180,8 @@ void handleResumeQuery(SSL *ssl, const string &raw_data)
 
     string resumeId = payload.substr(0, pos1);
     string filename = WinDrop::sanitizeRelativePath(payload.substr(pos1 + 1, pos2 - pos1 - 1));
+    if (!namespacePrefix.empty())
+        filename = namespacePrefix + "/" + filename;
     long long size = stoll(payload.substr(pos2 + 1, pos3 - pos2 - 1));
     string senderPrefixHash = payload.substr(pos3 + 1);
     while (!senderPrefixHash.empty() && (senderPrefixHash.back() == '\n' || senderPrefixHash.back() == '\r'))
@@ -230,7 +239,7 @@ void handleResumeQuery(SSL *ssl, const string &raw_data)
 // (a recvData() call failed) — true otherwise, including ordinary rejection
 // outcomes like FILE_BUSY or CHECKSUM_MISMATCH, since those still complete
 // a valid request/response exchange and leave the connection usable.
-bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *buffer, size_t bufferSize)
+bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *buffer, size_t bufferSize, const string &namespacePrefix = "")
 {
     string payload = raw_data.substr(8);
     size_t pos = 0;
@@ -247,6 +256,8 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
 
     string id = parts[0];
     string filename = WinDrop::sanitizeRelativePath(parts[1]);
+    if (!namespacePrefix.empty())
+        filename = namespacePrefix + "/" + filename;
     string size_str = parts[2];
     string sender = parts[3];
     if (!sender.empty() && sender.back() == '\n')
@@ -573,6 +584,11 @@ void handle_client(int new_socket)
         state->id = id;
         state->isFolder = true;
         state->folderName = folderName;
+        // Combining the display name with the transfer id guarantees this is
+        // unique per transfer even if two folders share the same name (or
+        // the same folder is sent twice) -- sanitizeFilename is a defensive
+        // final pass, since both inputs should already be safe on their own.
+        state->folderNamespace = WinDrop::sanitizeFilename(folderName + "_" + id);
         state->fileCount = fileCount;
         state->sender = sender;
         try { state->size = stoll(totalSizeStr); } catch (...) { state->size = 0; }
@@ -653,7 +669,7 @@ void handle_client(int new_socket)
 
                 if (fileMsg.find("RESUME_QUERY:") == 0)
                 {
-                    handleResumeQuery(ssl, fileMsg);
+                    handleResumeQuery(ssl, fileMsg, state->folderNamespace);
                     memset(buffer, 0, CHUNK_SIZE);
                     nbytes = Net::recvData(ssl, buffer, CHUNK_SIZE - 1);
                     if (nbytes <= 0)
@@ -663,7 +679,7 @@ void handle_client(int new_socket)
 
                 if (fileMsg.find("REQUEST:") == 0)
                 {
-                    bool connectionAlive = handleFileRequest(ssl, sock, fileMsg, buffer, CHUNK_SIZE);
+                    bool connectionAlive = handleFileRequest(ssl, sock, fileMsg, buffer, CHUNK_SIZE, state->folderNamespace);
                     filesReceived++;
                     if (!connectionAlive)
                         break;
