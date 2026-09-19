@@ -10,6 +10,7 @@
 #include <sstream>
 #include <vector>
 #include <random>
+#include <filesystem>
 #include "sha256.h"
 #include "net_platform.h"
 #include "metadata.h"
@@ -55,12 +56,6 @@ bool g_benchmarkAutoAccept = false;
 // then read (never written) by both the broadcaster and listener threads.
 // Write-once-then-read-only means no mutex is needed around it.
 string my_session_id;
-
-// Strips any directory component from an untrusted, peer-supplied filename
-// and rejects anything that would resolve outside the current working
-// directory (e.g. "../../etc/passwd" or a bare ".."). Every filename that
-// arrives over the network — in both REQUEST and RESUME_QUERY — must be
-// passed through this before it's ever used in a filesystem path.
 
 string getLocalIP()
 {
@@ -163,12 +158,345 @@ void run_stdin_listener()
     }
 }
 
+// Handles one "RESUME_QUERY:id|filename|size|firstChunkHash" message and
+// sends the appropriate RESUME_RESPONSE. Used both for a standalone
+// single-file transfer and, unchanged, for each file inside a folder
+// transfer's per-file loop.
+void handleResumeQuery(SSL *ssl, const string &raw_data)
+{
+    string payload = raw_data.substr(13);
+    size_t pos1 = payload.find('|');
+    size_t pos2 = (pos1 != string::npos) ? payload.find('|', pos1 + 1) : string::npos;
+    size_t pos3 = (pos2 != string::npos) ? payload.find('|', pos2 + 1) : string::npos;
+    if (pos1 == string::npos || pos2 == string::npos || pos3 == string::npos)
+        return;
+
+    string resumeId = payload.substr(0, pos1);
+    string filename = WinDrop::sanitizeRelativePath(payload.substr(pos1 + 1, pos2 - pos1 - 1));
+    long long size = stoll(payload.substr(pos2 + 1, pos3 - pos2 - 1));
+    string senderPrefixHash = payload.substr(pos3 + 1);
+    while (!senderPrefixHash.empty() && (senderPrefixHash.back() == '\n' || senderPrefixHash.back() == '\r'))
+        senderPrefixHash.pop_back();
+
+    long long metaSize;
+    int lastChunk = WinDrop::read_metadata(filename, metaSize);
+    string part_filename = filename + ".part";
+
+    if (lastChunk != -1 && metaSize == size)
+    {
+        bool safeToResume = false;
+        if (lastChunk >= 1)
+        {
+            string localPrefixHash = WinDrop::computeSHA256Prefix(part_filename, CHUNK_SIZE);
+            safeToResume = (localPrefixHash == senderPrefixHash);
+        }
+
+        if (safeToResume)
+        {
+            string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
+        }
+        else
+        {
+            cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
+            remove(part_filename.c_str());
+            remove((filename + ".part.meta").c_str());
+            string resp = "RESUME_RESPONSE:NO\n";
+            Net::sendData(ssl, resp.c_str(), resp.length());
+        }
+    }
+    else if (lastChunk != -1 && metaSize != size)
+    {
+        cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
+        string resp = "RESUME_RESPONSE:NO\n";
+        Net::sendData(ssl, resp.c_str(), resp.length());
+    }
+    else
+    {
+        string resp = "RESUME_RESPONSE:NO\n";
+        Net::sendData(ssl, resp.c_str(), resp.length());
+    }
+}
+
+// Handles one "REQUEST:id|filename|size|sender" message end-to-end: the
+// accept/reject wait, single-writer guard, subdirectory creation, streaming
+// receive, and checksum-verified finalization. Does NOT close the TLS
+// connection — that's the caller's decision, since this is now reused both
+// for a standalone single-file transfer (caller closes right after) and for
+// each file inside a folder transfer's loop (caller keeps the connection
+// open for the next file).
+//
+// Returns false only when the underlying connection appears to have died
+// (a recvData() call failed) — true otherwise, including ordinary rejection
+// outcomes like FILE_BUSY or CHECKSUM_MISMATCH, since those still complete
+// a valid request/response exchange and leave the connection usable.
+bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *buffer, size_t bufferSize)
+{
+    string payload = raw_data.substr(8);
+    size_t pos = 0;
+    vector<string> parts;
+    while ((pos = payload.find('|')) != string::npos)
+    {
+        parts.push_back(payload.substr(0, pos));
+        payload.erase(0, pos + 1);
+    }
+    parts.push_back(payload);
+
+    if (parts.size() < 4)
+        return false;
+
+    string id = parts[0];
+    string filename = WinDrop::sanitizeRelativePath(parts[1]);
+    string size_str = parts[2];
+    string sender = parts[3];
+    if (!sender.empty() && sender.back() == '\n')
+        sender.pop_back();
+    if (!sender.empty() && sender.back() == '\r')
+        sender.pop_back();
+
+    cout << "INCOMING_REQUEST:" << id << "|" << filename << "|" << size_str << "|" << sender << endl;
+
+    auto state = make_shared<RequestState>();
+    state->socket = (int)sock;
+    state->id = id;
+    state->filename = filename;
+    state->sender = sender;
+    try
+    {
+        state->size = stoll(size_str);
+    }
+    catch (...)
+    {
+        state->size = 0;
+    }
+
+    {
+        lock_guard lock(requests_mutex);
+        pending_requests[id] = state;
+    }
+
+    unique_lock state_lock(state->mtx);
+    if (g_benchmarkAutoAccept)
+    {
+        state->decision_made = true;
+        state->accepted = true;
+        cout << "AUTO-ACCEPTED (benchmark mode): " << id << endl;
+    }
+    else
+    {
+        state->cv.wait(state_lock, [&]
+                       { return state->decision_made; });
+    }
+
+    bool connectionAlive = true;
+
+    if (state->accepted)
+    {
+        // --- GAP 4: Single-Writer Guard Check ---
+        {
+            lock_guard write_lock(writes_mutex);
+            if (active_writes.count(filename))
+            {
+                Net::sendData(ssl, "ERROR:FILE_BUSY\n", 16);
+                cout << "ERROR:FILE_BUSY|" << id << endl;
+                lock_guard req_lock(requests_mutex);
+                pending_requests.erase(id);
+                return true; // connection is fine, just this file was rejected
+            }
+            active_writes.insert(filename);
+        }
+        // ----------------------------------------
+
+        string resp = "REQUEST_ACCEPT:" + id + "\n";
+        Net::sendData(ssl, resp.c_str(), resp.length());
+
+        long long total_size = state->size;
+        int chunks_received = 0;
+        string part_filename = filename + ".part";
+
+        long long metaSize;
+        int lastChunk = WinDrop::read_metadata(filename, metaSize);
+        if (lastChunk != -1 && metaSize == total_size)
+        {
+            chunks_received = lastChunk;
+            cout << "🔄 Resuming transfer from chunk " << chunks_received << endl;
+        }
+
+        memset(buffer, 0, bufferSize);
+
+        // If filename carries subdirectory structure (a folder-transfer
+        // entry like "photos/vacation/img1.jpg"), make sure those
+        // directories exist before trying to open the file. Harmless
+        // no-op for a plain basename with no parent path.
+        std::filesystem::path outPath(part_filename);
+        if (outPath.has_parent_path())
+        {
+            std::error_code dirErr;
+            std::filesystem::create_directories(outPath.parent_path(), dirErr);
+            if (dirErr)
+            {
+                cout << "ERROR:PERMISSION_DENIED|" << id << endl;
+                string err = "ERROR:PERMISSION_DENIED\n";
+                Net::sendData(ssl, err.c_str(), err.length());
+                {
+                    lock_guard write_lock(writes_mutex);
+                    active_writes.erase(filename);
+                }
+                {
+                    lock_guard req_lock(requests_mutex);
+                    pending_requests.erase(id);
+                }
+                return true;
+            }
+        }
+
+        ofstream outfile(part_filename, ios::binary | ios::app);
+        if (!outfile)
+        {
+            cout << "ERROR:PERMISSION_DENIED|" << id << endl;
+            string err = "ERROR:PERMISSION_DENIED\n";
+            Net::sendData(ssl, err.c_str(), err.length());
+
+            // --- GAP 4: Erase from both maps on early return (Leak Fix) ---
+            {
+                lock_guard write_lock(writes_mutex);
+                active_writes.erase(filename);
+            }
+            {
+                lock_guard req_lock(requests_mutex);
+                pending_requests.erase(id);
+            }
+            // --------------------------------------------------------------
+            return true;
+        }
+
+        vector<char> write_buffer;
+        // --- GAP 1: Track clean protocol exits ---
+        bool transfer_completed = false;
+        long long bytes_received_total = (long long)chunks_received * CHUNK_SIZE;
+        auto lastReport = std::chrono::steady_clock::now();
+
+        while (bytes_received_total < total_size)
+        {
+            long long remaining = total_size - bytes_received_total;
+            size_t to_read = (size_t)std::min((long long)bufferSize, remaining);
+            int bytes_read = Net::recvData(ssl, buffer, to_read);
+
+            if (bytes_read <= 0)
+            {
+                connectionAlive = false;
+                break; // disconnect — transfer_completed stays false
+            }
+
+            write_buffer.insert(write_buffer.end(), buffer, buffer + bytes_read);
+            bytes_received_total += bytes_read;
+            chunks_received = (int)(bytes_received_total / CHUNK_SIZE);
+
+            if (write_buffer.size() >= FLUSH_THRESHOLD || bytes_received_total == total_size)
+            {
+                outfile.write(write_buffer.data(), write_buffer.size());
+                WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
+                write_buffer.clear();
+            }
+
+            // Progress sampling
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count() >= 150)
+            {
+                cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
+                lastReport = now;
+            }
+        }
+
+        // Loop exits exactly when all file bytes are in — now safely read the control message
+        if (bytes_received_total == total_size)
+        {
+            outfile.close();
+            char completeBuf[128];
+            memset(completeBuf, 0, sizeof(completeBuf));
+            int n = Net::recvData(ssl, completeBuf, sizeof(completeBuf) - 1);
+            if (n <= 0)
+            {
+                connectionAlive = false;
+            }
+            string complete_msg(completeBuf, n > 0 ? n : 0);
+
+            if (complete_msg.find("COMPLETE:") == 0)
+            {
+                string sender_checksum = complete_msg.substr(9);
+                if (!sender_checksum.empty() && sender_checksum.back() == '\n')
+                    sender_checksum.pop_back();
+                if (!sender_checksum.empty() && sender_checksum.back() == '\r')
+                    sender_checksum.pop_back();
+
+                string local_checksum = WinDrop::computeSHA256(part_filename);
+                if (local_checksum == sender_checksum)
+                {
+                    if (rename(part_filename.c_str(), filename.c_str()) == 0)
+                    {
+                        cout << "✅ File Verified and Saved: " << filename << endl;
+                        string meta_file = filename + ".part.meta";
+                        remove(meta_file.c_str());
+                        Net::sendData(ssl, "DELIVERED_ACK\n", 14);
+
+                        // --- GAP 3: Signal final success to Node.js ---
+                        cout << "RECEIVED_OK|" << id << endl;
+                    }
+                    else
+                    {
+                        cout << "ERROR:DISK_FULL|" << id << endl;
+                        Net::sendData(ssl, "ERROR:DISK_FULL\n", 16);
+                    }
+                }
+                else
+                {
+                    cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
+                    cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
+                    Net::sendData(ssl, "ERROR:CHECKSUM_MISMATCH\n", 24);
+                }
+                transfer_completed = true;
+            }
+        }
+        else
+        {
+            if (outfile.is_open())
+                outfile.close();
+        }
+
+        // --- GAP 1: Detect sudden network drops ---
+        if (!transfer_completed)
+        {
+            cout << "ERROR:PEER_DISCONNECTED|" << id << endl;
+        }
+
+        // --- GAP 4: Release the filename lock ---
+        {
+            lock_guard write_lock(writes_mutex);
+            active_writes.erase(filename);
+        }
+        // ----------------------------------------
+    }
+    else
+    {
+        string resp = "REQUEST_REJECT:" + id + "\n";
+        Net::sendData(ssl, resp.c_str(), resp.length());
+        cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
+    }
+
+    {
+        lock_guard lock(requests_mutex);
+        pending_requests.erase(id);
+    }
+
+    return connectionAlive;
+}
+
 void handle_client(int new_socket)
 {
     socket_t sock = (socket_t)new_socket;
     Net::setNoDelay(sock);
     Net::setSocketBufferSize(sock, 1 << 20);
-    Net::setRecvTimeout(sock, 60); 
+    Net::setRecvTimeout(sock, 60);
     SSL *ssl = Net::tlsAccept(sock, g_server_tls_ctx);
     if (!ssl)
     {
@@ -186,70 +514,20 @@ void handle_client(int new_socket)
 
     string raw_data(buffer, bytes_read);
 
-    // Handle Resume Query
+    // Handle Resume Query (standalone single-file case)
     if (raw_data.find("RESUME_QUERY:") == 0)
-{
-    string payload = raw_data.substr(13);
-    size_t pos1 = payload.find('|');
-    size_t pos2 = (pos1 != string::npos) ? payload.find('|', pos1 + 1) : string::npos;
-    size_t pos3 = (pos2 != string::npos) ? payload.find('|', pos2 + 1) : string::npos;
-    if (pos1 != string::npos && pos2 != string::npos && pos3 != string::npos)
     {
-        string resumeId = payload.substr(0, pos1);
-        string filename = WinDrop::sanitizeFilename(payload.substr(pos1 + 1, pos2 - pos1 - 1));
-        long long size = stoll(payload.substr(pos2 + 1, pos3 - pos2 - 1));
-        string senderPrefixHash = payload.substr(pos3 + 1);
-        while (!senderPrefixHash.empty() && (senderPrefixHash.back() == '\n' || senderPrefixHash.back() == '\r'))
-            senderPrefixHash.pop_back();
+        handleResumeQuery(ssl, raw_data);
 
-        long long metaSize;
-        int lastChunk = WinDrop::read_metadata(filename, metaSize);
-        string part_filename = filename + ".part";
-
-        if (lastChunk != -1 && metaSize == size)
+        memset(buffer, 0, CHUNK_SIZE);
+        bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+        if (bytes_read <= 0)
         {
-            bool safeToResume = false;
-            if (lastChunk >= 1)
-            {
-                string localPrefixHash = WinDrop::computeSHA256Prefix(part_filename, CHUNK_SIZE);
-                safeToResume = (localPrefixHash == senderPrefixHash);
-            }
-
-            if (safeToResume)
-            {
-                string resp = "RESUME_RESPONSE:OK|" + to_string(lastChunk) + "\n";
-                Net::sendData(ssl, resp.c_str(), resp.length());
-            }
-            else
-            {
-                cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
-                remove(part_filename.c_str());
-                remove((filename + ".part.meta").c_str());
-                string resp = "RESUME_RESPONSE:NO\n";
-                Net::sendData(ssl, resp.c_str(), resp.length());
-            }
+            Net::closeTLS(ssl, sock);
+            return;
         }
-        else if (lastChunk != -1 && metaSize != size)
-        {
-            cout << "ERROR:RESUME_STATE_INVALID|" << resumeId << endl;
-            string resp = "RESUME_RESPONSE:NO\n";
-            Net::sendData(ssl, resp.c_str(), resp.length());
-        }
-        else
-        {
-            string resp = "RESUME_RESPONSE:NO\n";
-            Net::sendData(ssl, resp.c_str(), resp.length());
-        }
+        raw_data = string(buffer, bytes_read);
     }
-    memset(buffer, 0, CHUNK_SIZE);
-    bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-    if (bytes_read <= 0)
-    {
-        Net::closeTLS(ssl, sock);
-        return;
-    }
-    raw_data = string(buffer, bytes_read);
-}
 
     if (raw_data.find("FOLDER_REQUEST:") == 0)
     {
@@ -359,11 +637,45 @@ void handle_client(int new_socket)
             string resp = "FOLDER_ACCEPT:" + id + "\n";
             Net::sendData(ssl, resp.c_str(), resp.length());
             cout << "FOLDER_ACCEPTED:" << id << "|filesToReceive=" << state->manifest.size() << endl;
-            // Phase 3 hooks in here: instead of closing the connection, loop
-            // over state->manifest and handle a REQUEST/RESUME_QUERY/stream
-            // cycle per file on this same ssl connection, reusing the
-            // existing single-file logic below unchanged. Phase 1 stops here
-            // so the handshake itself can be verified in isolation first.
+
+            // Receive each file in the manifest sequentially, over this same
+            // connection, reusing the exact single-file REQUEST/RESUME_QUERY
+            // logic via the extracted helpers above.
+            size_t filesReceived = 0;
+            for (size_t i = 0; i < state->manifest.size(); i++)
+            {
+                memset(buffer, 0, CHUNK_SIZE);
+                int nbytes = Net::recvData(ssl, buffer, CHUNK_SIZE - 1);
+                if (nbytes <= 0)
+                    break; // peer disconnected mid-folder
+
+                string fileMsg(buffer, nbytes);
+
+                if (fileMsg.find("RESUME_QUERY:") == 0)
+                {
+                    handleResumeQuery(ssl, fileMsg);
+                    memset(buffer, 0, CHUNK_SIZE);
+                    nbytes = Net::recvData(ssl, buffer, CHUNK_SIZE - 1);
+                    if (nbytes <= 0)
+                        break;
+                    fileMsg = string(buffer, nbytes);
+                }
+
+                if (fileMsg.find("REQUEST:") == 0)
+                {
+                    bool connectionAlive = handleFileRequest(ssl, sock, fileMsg, buffer, CHUNK_SIZE);
+                    filesReceived++;
+                    if (!connectionAlive)
+                        break;
+                }
+                else
+                {
+                    break; // unexpected message — stop the folder loop
+                }
+            }
+
+            cout << "FOLDER_TRANSFER_COMPLETE:" << id << "|received=" << filesReceived
+                 << "|total=" << state->manifest.size() << endl;
         }
         else
         {
@@ -382,231 +694,7 @@ void handle_client(int new_socket)
 
     if (raw_data.find("REQUEST:") == 0)
     {
-        string payload = raw_data.substr(8);
-        size_t pos = 0;
-        vector<string> parts;
-        while ((pos = payload.find('|')) != string::npos)
-        {
-            parts.push_back(payload.substr(0, pos));
-            payload.erase(0, pos + 1);
-        }
-        parts.push_back(payload);
-
-        if (parts.size() < 4)
-        {
-            Net::closeTLS(ssl, sock);
-            return;
-        }
-
-        string id = parts[0];
-        string filename = WinDrop::sanitizeFilename(parts[1]);
-        string size_str = parts[2];
-        string sender = parts[3];
-        if (!sender.empty() && sender.back() == '\n')
-            sender.pop_back();
-        if (!sender.empty() && sender.back() == '\r')
-            sender.pop_back();
-
-        cout << "INCOMING_REQUEST:" << id << "|" << filename << "|" << size_str << "|" << sender << endl;
-
-        auto state = make_shared<RequestState>();
-        state->socket = (int)sock;
-        state->id = id;
-        state->filename = filename;
-        state->sender = sender;
-        try
-        {
-            state->size = stoll(size_str);
-        }
-        catch (...)
-        {
-            state->size = 0;
-        }
-
-        {
-            lock_guard lock(requests_mutex);
-            pending_requests[id] = state;
-        }
-
-        unique_lock state_lock(state->mtx);
-        if (g_benchmarkAutoAccept)
-        {
-            state->decision_made = true;
-            state->accepted = true;
-            cout << "AUTO-ACCEPTED (benchmark mode): " << id << endl;
-        }
-        else
-        {
-            state->cv.wait(state_lock, [&]
-                           { return state->decision_made; });
-        }
-
-        if (state->accepted)
-        {
-            // --- GAP 4: Single-Writer Guard Check ---
-            {
-                lock_guard write_lock(writes_mutex);
-                if (active_writes.count(filename))
-                {
-                    Net::sendData(ssl, "ERROR:FILE_BUSY\n", 16);
-                    cout << "ERROR:FILE_BUSY|" << id << endl;
-                    Net::closeTLS(ssl, sock);
-
-                    lock_guard req_lock(requests_mutex);
-                    pending_requests.erase(id);
-                    return;
-                }
-                active_writes.insert(filename);
-            }
-            // ----------------------------------------
-
-            string resp = "REQUEST_ACCEPT:" + id + "\n";
-            Net::sendData(ssl, resp.c_str(), resp.length());
-
-            long long total_size = state->size;
-            int chunks_received = 0;
-            string part_filename = filename + ".part";
-
-            long long metaSize;
-            int lastChunk = WinDrop::read_metadata(filename, metaSize);
-            if (lastChunk != -1 && metaSize == total_size)
-            {
-                chunks_received = lastChunk;
-                cout << "🔄 Resuming transfer from chunk " << chunks_received << endl;
-            }
-
-            memset(buffer, 0, 65536);
-            ofstream outfile(part_filename, ios::binary | ios::app);
-            if (!outfile)
-            {
-                cout << "ERROR:PERMISSION_DENIED|" << id << endl;
-                string err = "ERROR:PERMISSION_DENIED\n";
-                Net::sendData(ssl, err.c_str(), err.length());
-                Net::closeTLS(ssl, sock);
-
-                // --- GAP 4: Erase from both maps on early return (Leak Fix) ---
-                {
-                    lock_guard write_lock(writes_mutex);
-                    active_writes.erase(filename);
-                }
-                {
-                    lock_guard req_lock(requests_mutex);
-                    pending_requests.erase(id);
-                }
-                // --------------------------------------------------------------
-                return;
-            }
-
-            vector<char> write_buffer;
-            // --- GAP 1: Track clean protocol exits ---
-            bool transfer_completed = false;
-            long long bytes_received_total = (long long)chunks_received * CHUNK_SIZE;
-            auto lastReport = std::chrono::steady_clock::now();
-
-            while (bytes_received_total < total_size)
-            {
-                long long remaining = total_size - bytes_received_total;
-                size_t to_read = (size_t)std::min((long long)sizeof(buffer), remaining);
-                bytes_read = Net::recvData(ssl, buffer, to_read);
-
-                if (bytes_read <= 0)
-                    break; // disconnect — transfer_completed stays false
-
-                write_buffer.insert(write_buffer.end(), buffer, buffer + bytes_read);
-                bytes_received_total += bytes_read;
-                chunks_received = (int)(bytes_received_total / CHUNK_SIZE);
-
-                if (write_buffer.size() >= FLUSH_THRESHOLD || bytes_received_total == total_size)
-                {
-                    outfile.write(write_buffer.data(), write_buffer.size());
-                    WinDrop::save_metadata(filename, total_size, CHUNK_SIZE, chunks_received);
-                    write_buffer.clear();
-                }
-
-                // Progress sampling
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count() >= 150)
-                {
-                    cout << "TRANSFER_PROGRESS:" << id << "|" << chunks_received << "|" << (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE << endl;
-                    lastReport = now;
-                }
-            }
-
-            // Loop exits exactly when all file bytes are in — now safely read the control message
-            if (bytes_received_total == total_size)
-            {
-                outfile.close();
-                char completeBuf[128];
-                memset(completeBuf, 0, sizeof(completeBuf));
-                int n = Net::recvData(ssl, completeBuf, sizeof(completeBuf) - 1);
-                string complete_msg(completeBuf, n > 0 ? n : 0);
-
-                if (complete_msg.find("COMPLETE:") == 0)
-                {
-                    string sender_checksum = complete_msg.substr(9);
-                    if (!sender_checksum.empty() && sender_checksum.back() == '\n')
-                        sender_checksum.pop_back();
-                    if (!sender_checksum.empty() && sender_checksum.back() == '\r')
-                        sender_checksum.pop_back();
-
-                    string local_checksum = WinDrop::computeSHA256(part_filename);
-                    if (local_checksum == sender_checksum)
-                    {
-                        if (rename(part_filename.c_str(), filename.c_str()) == 0)
-                        {
-                            cout << "✅ File Verified and Saved: " << filename << endl;
-                            string meta_file = filename + ".part.meta";
-                            remove(meta_file.c_str());
-                            Net::sendData(ssl, "DELIVERED_ACK\n", 14);
-
-                            // --- GAP 3: Signal final success to Node.js ---
-                            cout << "RECEIVED_OK|" << id << endl;
-                        }
-                        else
-                        {
-                            cout << "ERROR:DISK_FULL|" << id << endl;
-                            Net::sendData(ssl, "ERROR:DISK_FULL\n", 16);
-                        }
-                    }
-                    else
-                    {
-                        cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
-                        cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
-                        Net::sendData(ssl, "ERROR:CHECKSUM_MISMATCH\n", 24);
-                    }
-                    transfer_completed = true;
-                }
-            }
-            else
-            {
-                if (outfile.is_open())
-                    outfile.close();
-            }
-
-            // --- GAP 1: Detect sudden network drops ---
-            if (!transfer_completed)
-            {
-                cout << "ERROR:PEER_DISCONNECTED|" << id << endl;
-            }
-
-            // --- GAP 4: Release the filename lock ---
-            {
-                lock_guard write_lock(writes_mutex);
-                active_writes.erase(filename);
-            }
-            // ----------------------------------------
-        }
-        else
-        {
-            string resp = "REQUEST_REJECT:" + id + "\n";
-            Net::sendData(ssl, resp.c_str(), resp.length());
-            cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
-        }
-
-        {
-            lock_guard lock(requests_mutex);
-            pending_requests.erase(id);
-        }
+        handleFileRequest(ssl, sock, raw_data, buffer, CHUNK_SIZE);
         Net::closeTLS(ssl, sock);
     }
     else

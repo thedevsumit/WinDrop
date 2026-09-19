@@ -39,6 +39,198 @@ vector<pair<string, long long>> buildManifest(const string &folderPath)
     return manifest;
 }
 
+// Sends exactly one file end-to-end: RESUME_QUERY, REQUEST handshake,
+// streaming send, COMPLETE + checksum confirmation. Does NOT close the TLS
+// connection or free the context — that's the caller's responsibility,
+// since this is reused both for a standalone single-file transfer (caller
+// closes right after) and for each file inside a folder transfer's loop
+// (caller keeps the connection open for the next file).
+//
+// localFilePath is where to actually read bytes from on disk.
+// wireFilename is what gets sent in the protocol (a bare basename for a
+// standalone transfer, or a relative path like "photos/img1.jpg" for a
+// folder-transfer entry).
+//
+// Returns false only when the underlying connection appears to have died
+// (a send/recv call failed) — true otherwise, including ordinary rejection
+// outcomes like FILE_BUSY or CHECKSUM_MISMATCH, since those still complete
+// a valid request/response exchange and leave the connection usable for
+// the next file in a folder loop.
+bool sendOneFile(SSL *ssl, const string &localFilePath, const string &wireFilename,
+                  const string &requestId, const string &senderName)
+{
+    long long fileSize = getFileSize(localFilePath);
+
+    string prefixHash = WinDrop::computeSHA256Prefix(localFilePath, CHUNK_SIZE);
+    string resume_query =
+        "RESUME_QUERY:" + requestId + "|" +
+        wireFilename + "|" +
+        to_string(fileSize) + "|" +
+        prefixHash + "\n";
+
+    if (Net::sendData(ssl, resume_query.c_str(), resume_query.length()) <= 0)
+        return false;
+
+    char buffer[65536];
+    memset(buffer, 0, sizeof(buffer));
+    int bytes_received = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+    if (bytes_received <= 0)
+    {
+        cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+        return false;
+    }
+
+    int lastChunk = 0;
+    {
+        string response(buffer, bytes_received);
+        if (response.find("RESUME_RESPONSE:OK|") == 0)
+        {
+            string chunk_str = response.substr(19);
+            try
+            {
+                lastChunk = stoi(chunk_str);
+                cout << "🔄 Resuming transfer from chunk " << lastChunk << endl;
+            }
+            catch (...)
+            {
+                cout << "⚠️ Malformed resume response, starting from scratch." << endl;
+                lastChunk = 0;
+            }
+        }
+        else
+        {
+            cout << "🆕 Starting new transfer." << endl;
+        }
+    }
+
+    string request =
+        "REQUEST:" + requestId + "|" +
+        wireFilename + "|" +
+        to_string(fileSize) + "|" +
+        senderName + "\n";
+
+    if (Net::sendData(ssl, request.c_str(), request.length()) <= 0)
+        return false;
+
+    cout << "📡 Handshake request sent (" << requestId
+         << "). Waiting for acceptance..." << endl;
+
+    memset(buffer, 0, sizeof(buffer));
+    bytes_received = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+    if (bytes_received <= 0)
+    {
+        cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+        return false;
+    }
+
+    string response(buffer, bytes_received);
+    bool connectionAlive = true;
+
+    if (response.find("REQUEST_ACCEPT:" + requestId) == 0)
+    {
+        cout << "✅ Transfer accepted! Starting stream..." << endl;
+
+        ifstream infile(localFilePath, ios::binary);
+        if (!infile.is_open())
+        {
+            cout << "ERROR:PERMISSION_DENIED|" << requestId << endl;
+            return true; // connection itself is still fine, just this file failed to open
+        }
+
+        if (lastChunk > 0)
+            infile.seekg((long long)lastChunk * CHUNK_SIZE);
+
+        char fileBuffer[CHUNK_SIZE];
+        int totalChunks = (int)((fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        int currentChunk = lastChunk;
+        long long bytesSent = (long long)lastChunk * CHUNK_SIZE;
+
+        auto lastReport = chrono::steady_clock::now();
+        auto transferStart = chrono::steady_clock::now();
+
+        while (infile.read(fileBuffer, sizeof(fileBuffer)) || infile.gcount() > 0)
+        {
+            streamsize bytes_to_send = infile.gcount();
+            int sent = Net::sendData(ssl, fileBuffer, bytes_to_send);
+
+            if (sent <= 0)
+            {
+                cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+                infile.close();
+                return false;
+            }
+
+            bytesSent += bytes_to_send;
+            currentChunk = (int)((bytesSent + CHUNK_SIZE - 1) / CHUNK_SIZE);
+
+            auto now = chrono::steady_clock::now();
+            if (chrono::duration_cast<chrono::milliseconds>(now - lastReport).count() >= 150)
+            {
+                cout << "SENDER_PROGRESS:" << requestId << "|" << currentChunk << "|" << totalChunks << endl;
+                lastReport = now;
+            }
+        }
+
+        string checksum = WinDrop::computeSHA256(localFilePath);
+        string complete_msg = "COMPLETE:" + checksum + "\n";
+        if (Net::sendData(ssl, complete_msg.c_str(), complete_msg.length()) <= 0)
+        {
+            infile.close();
+            return false;
+        }
+
+        cout << "🏁 File sent. Waiting for delivery confirmation..." << endl;
+
+        memset(buffer, 0, sizeof(buffer));
+        bytes_received = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
+
+        if (bytes_received > 0)
+        {
+            string final_resp(buffer, bytes_received);
+
+            if (final_resp.find("DELIVERED_ACK") == 0)
+            {
+                auto transferEnd = chrono::steady_clock::now();
+                long long elapsedMs = chrono::duration_cast<chrono::milliseconds>(
+                                          transferEnd - transferStart)
+                                          .count();
+                cout << "BENCHMARK:" << elapsedMs << "|" << fileSize << endl;
+                cout << "🌟 SUCCESS: File delivered and verified!" << endl;
+            }
+            else if (final_resp.find("ERROR:CHECKSUM_MISMATCH") == 0)
+            {
+                cout << "ERROR:CHECKSUM_MISMATCH|" << requestId << endl;
+            }
+            else if (final_resp.find("ERROR:DISK_FULL") == 0)
+            {
+                cout << "ERROR:DISK_FULL|" << requestId << endl;
+            }
+            else
+            {
+                cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+                connectionAlive = false;
+            }
+        }
+        else
+        {
+            cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
+            connectionAlive = false;
+        }
+
+        infile.close();
+    }
+    else if (response.find("ERROR:FILE_BUSY") == 0)
+    {
+        cout << "ERROR:FILE_BUSY|" << requestId << endl;
+    }
+    else
+    {
+        cout << "ERROR:TRANSFER_REJECTED|" << requestId << endl;
+    }
+
+    return connectionAlive;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 4)
@@ -55,7 +247,6 @@ int main(int argc, char *argv[])
     bool isFolderMode = (argc >= 5 && string(argv[4]) == "--folder");
 
     socket_t sock = Net::createSocket(SOCK_STREAM);
-
     if (sock == -1)
     {
         cerr << "Socket creation error" << endl;
@@ -65,7 +256,6 @@ int main(int argc, char *argv[])
     struct sockaddr_in serv_addr;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(8080);
-
     if (Net::inetPton(target_ip.c_str(), &serv_addr) <= 0)
     {
         cerr << "Invalid address/ Address not supported" << endl;
@@ -73,7 +263,6 @@ int main(int argc, char *argv[])
     }
 
     cout << "🔄 Attempting connection to " << target_ip << "..." << endl;
-
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
     {
         cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
@@ -93,27 +282,32 @@ int main(int argc, char *argv[])
         Net::cleanup();
         return 1;
     }
-    // Resume Support
+
+    // Trust-on-first-use certificate pinning
     string fingerprint = Net::getPeerCertFingerprint(ssl);
     auto known = WinDrop::loadTrustStore();
     auto it = known.find(target_ip);
 
     if (it == known.end())
     {
-        // First time seeing this peer — trust on first use, and remember it.
         cout << "🔑 New peer, trusting on first connection: " << fingerprint.substr(0, 16) << "..." << endl;
         WinDrop::trustPeer(target_ip, fingerprint);
     }
     else if (it->second != fingerprint)
     {
-        // Fingerprint changed since last time — this is exactly what an
-        // active MITM looks like. Refuse to proceed.
         cerr << "⚠️  WARNING: certificate for " << target_ip
              << " does NOT match the one seen previously. Possible MITM. Aborting." << endl;
         cout << "ERROR:CERT_MISMATCH|" << requestId << endl;
         Net::closeTLS(ssl, sock);
+        SSL_CTX_free(client_tls_ctx);
+        Net::cleanup();
         return 1;
     }
+
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) != 0)
+        strcpy(hostname, "Unknown_Peer");
+    string senderName(hostname);
 
     if (isFolderMode)
     {
@@ -123,11 +317,6 @@ int main(int argc, char *argv[])
         for (auto &entry : manifest) totalSize += entry.second;
         string folderName = fs::path(file_path).filename().string();
         if (folderName.empty()) folderName = "folder"; // path had a trailing slash
-
-        char hostname[256];
-        if (gethostname(hostname, sizeof(hostname)) != 0)
-            strcpy(hostname, "Unknown_Peer");
-        string senderName(hostname);
 
         string folderReq = "FOLDER_REQUEST:" + requestId + "|" + folderName + "|" +
                             to_string(manifest.size()) + "|" + to_string(totalSize) + "|" +
@@ -153,6 +342,7 @@ int main(int argc, char *argv[])
         {
             cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
             Net::closeTLS(ssl, sock);
+            SSL_CTX_free(client_tls_ctx);
             Net::cleanup();
             return 1;
         }
@@ -160,11 +350,29 @@ int main(int argc, char *argv[])
 
         if (folderResp.find("FOLDER_ACCEPT:" + requestId) == 0)
         {
-            cout << "✅ Folder transfer accepted! (" << manifest.size()
-                 << " files — per-file streaming lands in Phase 3)" << endl;
-            // Phase 3: loop over `manifest` here, sending a REQUEST per file
-            // over this same `ssl` connection, reusing the existing
-            // single-file send loop below unchanged.
+            cout << "✅ Folder transfer accepted! Sending " << manifest.size() << " file(s)..." << endl;
+
+            int filesSent = 0;
+            int filesFailed = 0;
+            for (size_t i = 0; i < manifest.size(); i++)
+            {
+                const string &relPath = manifest[i].first;
+                string localPath = (fs::path(file_path) / relPath).string();
+                string perFileId = requestId + "_" + to_string(i);
+
+                cout << "📄 (" << (i + 1) << "/" << manifest.size() << ") " << relPath << endl;
+
+                bool connectionAlive = sendOneFile(ssl, localPath, relPath, perFileId, senderName);
+                filesSent++;
+                if (!connectionAlive)
+                {
+                    filesFailed = (int)(manifest.size() - i); // this + everything not yet attempted
+                    break;
+                }
+            }
+
+            cout << "FOLDER_SEND_COMPLETE:" << requestId << "|sent=" << filesSent
+                 << "|failed=" << filesFailed << "|total=" << manifest.size() << endl;
         }
         else
         {
@@ -177,225 +385,9 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // Standalone single-file transfer
     string filename = file_path.substr(file_path.find_last_of("/\\") + 1);
-    long long fileSize = getFileSize(file_path);
-
-    string prefixHash = WinDrop::computeSHA256Prefix(file_path, CHUNK_SIZE);
-    string resume_query =
-        "RESUME_QUERY:" + requestId + "|" +
-        filename + "|" +
-        to_string(fileSize) + "|" +
-        prefixHash + "\n";
-
-    Net::sendData(ssl, resume_query.c_str(), resume_query.length());
-
-    char buffer[65536];
-    memset(buffer, 0, sizeof(buffer));
-
-    int bytes_received =
-        Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-
-    int lastChunk = 0;
-
-    if (bytes_received > 0)
-    {
-        string response(buffer, bytes_received);
-
-        if (response.find("RESUME_RESPONSE:OK|") == 0)
-        {
-            string chunk_str = response.substr(19);
-            try
-            {
-                lastChunk = stoi(chunk_str);
-                cout << "🔄 Resuming transfer from chunk " << lastChunk << endl;
-            }
-            catch (...)
-            {
-                cout << "⚠️ Malformed resume response, starting from scratch." << endl;
-                lastChunk = 0;
-            }
-        }
-        else
-        {
-            cout << "🆕 Starting new transfer." << endl;
-        }
-    }
-
-    // Handshake
-    char hostname[256];
-
-    if (gethostname(hostname, sizeof(hostname)) != 0)
-        strcpy(hostname, "Unknown_Peer");
-
-    string senderName(hostname);
-
-    string request =
-        "REQUEST:" + requestId + "|" +
-        filename + "|" +
-        to_string(fileSize) + "|" +
-        senderName + "\n";
-
-    Net::sendData(ssl, request.c_str(), request.length());
-
-    cout << "📡 Handshake request sent (" << requestId
-         << "). Waiting for acceptance..." << endl;
-
-    memset(buffer, 0, sizeof(buffer));
-
-    bytes_received =
-        Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-
-    if (bytes_received <= 0)
-    {
-        cout << "ERROR:PEER_DISCONNECTED|" << requestId << endl;
-        Net::closeTLS(ssl, sock);
-        SSL_CTX_free(client_tls_ctx);
-        Net::cleanup();
-        return 1;
-    }
-
-    string response(buffer, bytes_received);
-
-    if (response.find("REQUEST_ACCEPT:" + requestId) == 0)
-    {
-        cout << "✅ Transfer accepted! Starting stream..." << endl;
-
-        ifstream infile(file_path, ios::binary);
-
-        if (!infile.is_open())
-        {
-            cout << "ERROR:PERMISSION_DENIED|" << requestId << endl;
-            Net::closeTLS(ssl, sock);
-            SSL_CTX_free(client_tls_ctx);
-            Net::cleanup();
-            return 1;
-        }
-
-        if (lastChunk > 0)
-        {
-            infile.seekg((long long)lastChunk * CHUNK_SIZE);
-        }
-
-        char fileBuffer[CHUNK_SIZE];
-
-        int totalChunks =
-            (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-        int currentChunk = lastChunk;
-
-        long long bytesSent =
-            (long long)lastChunk * CHUNK_SIZE;
-
-        auto lastReport = chrono::steady_clock::now();
-        auto transferStart = chrono::steady_clock::now();
-
-        while (infile.read(fileBuffer, sizeof(fileBuffer)) ||
-               infile.gcount() > 0)
-        {
-            streamsize bytes_to_send = infile.gcount();
-
-            int sent =
-                Net::sendData(ssl, fileBuffer, bytes_to_send);
-
-            if (sent <= 0)
-            {
-                cout << "ERROR:PEER_DISCONNECTED|"
-                     << requestId << endl;
-
-                Net::closeTLS(ssl, sock);
-                SSL_CTX_free(client_tls_ctx);
-                Net::cleanup();
-                return 1;
-            }
-
-            bytesSent += bytes_to_send;
-
-            currentChunk =
-                (bytesSent + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-            // Progress sampling
-            auto now = chrono::steady_clock::now();
-
-            if (chrono::duration_cast<chrono::milliseconds>(
-                    now - lastReport)
-                    .count() >= 150)
-            {
-                cout << "SENDER_PROGRESS:"
-                     << requestId << "|"
-                     << currentChunk << "|"
-                     << totalChunks << endl;
-
-                lastReport = now;
-            }
-        }
-
-        // Delivery Confirmation
-        string checksum =
-            WinDrop::computeSHA256(file_path);
-
-        string complete_msg =
-            "COMPLETE:" + checksum + "\n";
-
-        Net::sendData(
-            ssl,
-            complete_msg.c_str(),
-            complete_msg.length());
-
-        cout << "🏁 File sent. Waiting for delivery confirmation..."
-             << endl;
-
-        memset(buffer, 0, sizeof(buffer));
-
-        bytes_received =
-            Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-
-        if (bytes_received > 0)
-        {
-            string final_resp(buffer, bytes_received);
-
-            if (final_resp.find("DELIVERED_ACK") == 0)
-            {
-                auto transferEnd = chrono::steady_clock::now();
-                long long elapsedMs = chrono::duration_cast<chrono::milliseconds>(
-                                          transferEnd - transferStart)
-                                          .count();
-                cout << "BENCHMARK:" << elapsedMs << "|" << fileSize << endl;
-                cout << "🌟 SUCCESS: File delivered and verified!"
-                     << endl;
-            }
-            else if (final_resp.find("ERROR:CHECKSUM_MISMATCH") == 0)
-            {
-                cout << "ERROR:CHECKSUM_MISMATCH|"
-                     << requestId << endl;
-            }
-            else if (final_resp.find("ERROR:DISK_FULL") == 0)
-            {
-                cout << "ERROR:DISK_FULL|"
-                     << requestId << endl;
-            }
-            else
-            {
-                cout << "ERROR:PEER_DISCONNECTED|"
-                     << requestId << endl;
-            }
-        }
-        else
-        {
-            cout << "ERROR:PEER_DISCONNECTED|"
-                 << requestId << endl;
-        }
-
-        infile.close();
-    }
-    else if (response.find("ERROR:FILE_BUSY") == 0)
-    {
-        cout << "ERROR:FILE_BUSY|" << requestId << endl;
-    }
-    else
-    {
-        cout << "ERROR:TRANSFER_REJECTED|"
-             << requestId << endl;
-    }
+    sendOneFile(ssl, file_path, filename, requestId, senderName);
 
     Net::closeTLS(ssl, sock);
     SSL_CTX_free(client_tls_ctx);
