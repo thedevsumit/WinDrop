@@ -239,7 +239,23 @@ void handleResumeQuery(SSL *ssl, const string &raw_data, const string &namespace
 // (a recvData() call failed) — true otherwise, including ordinary rejection
 // outcomes like FILE_BUSY or CHECKSUM_MISMATCH, since those still complete
 // a valid request/response exchange and leave the connection usable.
-bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *buffer, size_t bufferSize, const string &namespacePrefix = "")
+// Distinguishes what actually happened to one file inside handleFileRequest,
+// since "the TCP connection is still alive" and "this file was received
+// correctly" are different facts. Success is only ever returned from the
+// single path where the checksum matched and the file was renamed into
+// place. Failed covers every outcome where the connection remains usable
+// but this particular file did not succeed (rejected, busy, permission
+// denied, checksum mismatch, disk full). Disconnected covers every path
+// where the stream itself became unusable (a recv() failed, or a message
+// arrived that wasn't the protocol expected next).
+enum class FileOutcome
+{
+    Success,
+    Failed,
+    Disconnected
+};
+
+FileOutcome handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *buffer, size_t bufferSize, const string &namespacePrefix = "")
 {
     string payload = raw_data.substr(8);
     size_t pos = 0;
@@ -252,7 +268,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
     parts.push_back(payload);
 
     if (parts.size() < 4)
-        return false;
+        return FileOutcome::Disconnected;
 
     string id = parts[0];
     string filename = WinDrop::sanitizeRelativePath(parts[1]);
@@ -299,7 +315,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
                        { return state->decision_made; });
     }
 
-    bool connectionAlive = true;
+    FileOutcome outcome = FileOutcome::Failed;
 
     if (state->accepted)
     {
@@ -312,7 +328,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
                 cout << "ERROR:FILE_BUSY|" << id << endl;
                 lock_guard req_lock(requests_mutex);
                 pending_requests.erase(id);
-                return true; // connection is fine, just this file was rejected
+                return FileOutcome::Failed; // connection is fine, just this file was rejected
             }
             active_writes.insert(filename);
         }
@@ -357,7 +373,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
                     lock_guard req_lock(requests_mutex);
                     pending_requests.erase(id);
                 }
-                return true;
+                return FileOutcome::Failed;
             }
         }
 
@@ -378,7 +394,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
                 pending_requests.erase(id);
             }
             // --------------------------------------------------------------
-            return true;
+            return FileOutcome::Failed;
         }
 
         vector<char> write_buffer;
@@ -395,7 +411,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
 
             if (bytes_read <= 0)
             {
-                connectionAlive = false;
+                outcome = FileOutcome::Disconnected;
                 break; // disconnect — transfer_completed stays false
             }
 
@@ -426,13 +442,13 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
             char completeBuf[128];
             memset(completeBuf, 0, sizeof(completeBuf));
             int n = Net::recvData(ssl, completeBuf, sizeof(completeBuf) - 1);
-            if (n <= 0)
-            {
-                connectionAlive = false;
-            }
             string complete_msg(completeBuf, n > 0 ? n : 0);
 
-            if (complete_msg.find("COMPLETE:") == 0)
+            if (n <= 0)
+            {
+                outcome = FileOutcome::Disconnected;
+            }
+            else if (complete_msg.find("COMPLETE:") == 0)
             {
                 string sender_checksum = complete_msg.substr(9);
                 if (!sender_checksum.empty() && sender_checksum.back() == '\n')
@@ -452,11 +468,13 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
 
                         // --- GAP 3: Signal final success to Node.js ---
                         cout << "RECEIVED_OK|" << id << endl;
+                        outcome = FileOutcome::Success;
                     }
                     else
                     {
                         cout << "ERROR:DISK_FULL|" << id << endl;
                         Net::sendData(ssl, "ERROR:DISK_FULL\n", 16);
+                        outcome = FileOutcome::Failed;
                     }
                 }
                 else
@@ -464,8 +482,16 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
                     cout << "❌ Checksum Mismatch! Sender: " << sender_checksum << " Local: " << local_checksum << endl;
                     cout << "ERROR:CHECKSUM_MISMATCH|" << id << endl;
                     Net::sendData(ssl, "ERROR:CHECKSUM_MISMATCH\n", 24);
+                    outcome = FileOutcome::Failed;
                 }
                 transfer_completed = true;
+            }
+            else
+            {
+                // Got data but not the expected COMPLETE message — the
+                // stream is out of sync with the protocol and can't be
+                // trusted for any further files in this connection.
+                outcome = FileOutcome::Disconnected;
             }
         }
         else
@@ -492,6 +518,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
         string resp = "REQUEST_REJECT:" + id + "\n";
         Net::sendData(ssl, resp.c_str(), resp.length());
         cout << "ERROR:TRANSFER_REJECTED|" << id << endl;
+        outcome = FileOutcome::Failed;
     }
 
     {
@@ -499,7 +526,7 @@ bool handleFileRequest(SSL *ssl, socket_t sock, const string &raw_data, char *bu
         pending_requests.erase(id);
     }
 
-    return connectionAlive;
+    return outcome;
 }
 
 void handle_client(int new_socket)
@@ -658,6 +685,7 @@ void handle_client(int new_socket)
             // connection, reusing the exact single-file REQUEST/RESUME_QUERY
             // logic via the extracted helpers above.
             size_t filesReceived = 0;
+            size_t filesFailed = 0;
             for (size_t i = 0; i < state->manifest.size(); i++)
             {
                 memset(buffer, 0, CHUNK_SIZE);
@@ -679,10 +707,14 @@ void handle_client(int new_socket)
 
                 if (fileMsg.find("REQUEST:") == 0)
                 {
-                    bool connectionAlive = handleFileRequest(ssl, sock, fileMsg, buffer, CHUNK_SIZE, state->folderNamespace);
-                    filesReceived++;
-                    if (!connectionAlive)
-                        break;
+                    FileOutcome outcome = handleFileRequest(ssl, sock, fileMsg, buffer, CHUNK_SIZE, state->folderNamespace);
+                    if (outcome == FileOutcome::Success)
+                        filesReceived++;
+                    else if (outcome == FileOutcome::Failed)
+                        filesFailed++;
+
+                    if (outcome == FileOutcome::Disconnected)
+                        break; // connection is no longer usable for further files
                 }
                 else
                 {
@@ -691,6 +723,7 @@ void handle_client(int new_socket)
             }
 
             cout << "FOLDER_TRANSFER_COMPLETE:" << id << "|received=" << filesReceived
+                 << "|failed=" << filesFailed
                  << "|total=" << state->manifest.size() << endl;
         }
         else
