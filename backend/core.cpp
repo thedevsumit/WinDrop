@@ -569,6 +569,13 @@ void handle_client(int new_socket)
 
     if (raw_data.find("FOLDER_REQUEST:") == 0)
     {
+        // FOLDER_REQUEST is immediately followed by a separate FILE_MANIFEST
+        // message with no round-trip in between, so from here on this
+        // connection is read through a MsgReader rather than raw recvData()
+        // calls — see the class comment in net_platform.h for why a bare
+        // recvData() pair is unsafe for two back-to-back sends.
+        Net::MsgReader reader(ssl);
+
         string payload = raw_data.substr(15);
         vector<string> parts;
         size_t pos = 0;
@@ -596,15 +603,16 @@ void handle_client(int new_socket)
 
         // The manifest is sent as a second message, same pattern RESUME_QUERY
         // uses for its follow-up REQUEST — read it now, before deciding
-        // anything about this folder request.
-        memset(buffer, 0, CHUNK_SIZE);
-        bytes_read = Net::recvData(ssl, buffer, sizeof(buffer) - 1);
-        if (bytes_read <= 0)
+        // anything about this folder request. reader.readLine() blocks until
+        // a full '\n'-terminated message is buffered, however many recv()
+        // calls that takes, and keeps any bytes read past it for the next
+        // readLine() call rather than discarding them.
+        string manifestMsg;
+        if (!reader.readLine(manifestMsg))
         {
             Net::closeTLS(ssl, sock);
             return;
         }
-        string manifestMsg(buffer, bytes_read);
 
         auto state = make_shared<RequestState>();
         state->socket = (int)sock;

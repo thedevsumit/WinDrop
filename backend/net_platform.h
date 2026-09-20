@@ -21,6 +21,74 @@ typedef int socket_t;
 
 namespace Net
 {
+    // Buffered, delimiter-based reader for the control protocol.
+    //
+    // recvData()/SSL_read() give you "whatever bytes are available right
+    // now" — NOT "the next message." TCP (and TLS records on top of it)
+    // have no concept of message boundaries: two back-to-back sendData()
+    // calls can arrive coalesced into a single recvData() call on the
+    // other end, and a message larger than one recv() call's worth can
+    // arrive split across several. Every control message in this
+    // protocol (REQUEST, RESUME_QUERY, FOLDER_REQUEST, FILE_MANIFEST,
+    // COMPLETE, ...) is newline-terminated, so this class keeps
+    // whatever partial/extra bytes were read past the previous '\n' and
+    // returns exactly one line at a time, reading more from the socket
+    // only when the buffer doesn't yet contain a full one. This is a
+    // correctness requirement, not an optimization — without it,
+    // FOLDER_REQUEST followed immediately by FILE_MANIFEST can either
+    // hang (coalesced into one read, so the second recvData() call waits
+    // forever for bytes that already arrived) or silently truncate a
+    // large manifest (split across reads, first recvData() treated as
+    // the whole thing).
+    class MsgReader
+    {
+    public:
+        explicit MsgReader(SSL *ssl) : ssl_(ssl) {}
+
+        // Reads one newline-terminated message (delimiter stripped).
+        // Returns false if the connection closed/errored before a full
+        // line was available — treat this exactly like a failed
+        // recvData() call (peer disconnected).
+        bool readLine(std::string &out)
+        {
+            size_t nl;
+            while ((nl = buf_.find('\n')) == std::string::npos)
+            {
+                char chunk[65536];
+                int n = SSL_read(ssl_, chunk, sizeof(chunk));
+                if (n <= 0) return false;
+                buf_.append(chunk, n);
+            }
+            out = buf_.substr(0, nl);
+            if (!out.empty() && out.back() == '\r') out.pop_back();
+            buf_.erase(0, nl + 1);
+            return true;
+        }
+
+        // Reads exactly n bytes (used for raw file-chunk streaming,
+        // where the payload is length-prefixed by the caller's own
+        // size tracking rather than newline-delimited). Any bytes
+        // already buffered past the last readLine() are consumed
+        // first.
+        bool readExact(char *out, size_t n)
+        {
+            while (buf_.size() < n)
+            {
+                char chunk[65536];
+                int r = SSL_read(ssl_, chunk, sizeof(chunk));
+                if (r <= 0) return false;
+                buf_.append(chunk, r);
+            }
+            memcpy(out, buf_.data(), n);
+            buf_.erase(0, n);
+            return true;
+        }
+
+    private:
+        SSL *ssl_;
+        std::string buf_;
+    };
+
     // Lifecycle
     socket_t createSocket(int type);
     void closeSocket(socket_t fd);
