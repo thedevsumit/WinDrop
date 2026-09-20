@@ -7,6 +7,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { parseIdAndFields } = require('./wireParsers');
 
 const app = express();
 const HISTORY_FILE = './transfers.json';
@@ -121,16 +122,51 @@ const rejectedFolderSessions = new Set();
 // "file 2 of 4" instead of raw per-file IDs.
 const folderReceiveState = new Map();
 
+// Filename for each per-file id inside a folder RECEIVE, so a later
+// ERROR line (which only carries the id) can be reported against the
+// actual relative path rather than a meaningless per-file id.
+const folderReceiveFileNames = new Map();
+// Accumulated {path, code}[] per folder RECEIVE transfer, for the final
+// FOLDER_TRANSFER_COMPLETE summary and for display/history.
+const folderReceiveFailedFiles = new Map();
+
+// Same two concerns, mirrored for a folder SEND: which file is currently
+// being sent (from the sender's own "📄 (i/N) relPath" progress line),
+// and which files ultimately failed.
+const folderSendCurrentFile = new Map();
+const folderSendFailedFiles = new Map();
+
 function folderIdOf(perFileId) {
     const idx = perFileId.lastIndexOf('_');
     if (idx === -1) return null;
     return perFileId.substring(0, idx);
 }
 
-coreEngine.stdout.on('data', (data) => {
-    const lines = data.toString().trim().split('\n');
+// Wraps a child process's stdout so the callback always receives complete
+// lines, never a fragment. Node's 'data' event delivers whatever bytes the
+// OS pipe happened to have ready -- there is no guarantee a line written by
+// the C++ side in one call arrives in one 'data' event. Splitting each
+// chunk on '\n' independently (the previous approach) silently corrupts
+// any line that happens to straddle a chunk boundary: this is exactly what
+// turned "INCOMING_REQUEST:id|filename|size|sender" into two separate,
+// meaningless fragments in testing, which made the auto-accept logic for
+// folder transfers never fire and left the receiver hung waiting for a
+// decision indefinitely.
+function onCompleteLines(stream, callback) {
+    let buffer = '';
+    stream.on('data', (data) => {
+        buffer += data.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // last element is either '' or an incomplete line -- keep it for next time
+        lines.forEach(line => callback(line));
+    });
+}
 
-    lines.forEach(line => {
+onCompleteLines(coreEngine.stdout, (rawLine) => {
+    const line = rawLine.trim();
+    if (line.length === 0) return;
+
+    {
 
         if (line.includes('Founded Peer:')) {
 
@@ -200,42 +236,42 @@ coreEngine.stdout.on('data', (data) => {
         } else if (line.includes('FOLDER_TRANSFER_COMPLETE:')) {
 
             const payload = line.split('FOLDER_TRANSFER_COMPLETE:')[1].trim();
-            const fields = payload.split('|');
-            const id = fields[0];
-
-            // Read each field by its key rather than by position -- the
-            // wire format grew a "failed=" field between "received=" and
-            // "total=", and parsing by position silently mis-read "total"
-            // as the failed count for every folder transfer, including
-            // fully successful ones.
-            let received = 0, failed = 0, total = 0;
-            for (let i = 1; i < fields.length; i++) {
-                const [key, value] = fields[i].split('=');
-                if (key === 'received') received = parseInt(value);
-                else if (key === 'failed') failed = parseInt(value);
-                else if (key === 'total') total = parseInt(value);
-            }
+            const { id, fields } = parseIdAndFields(payload);
+            const received = fields.received || 0;
+            const failed = fields.failed || 0;
+            const total = fields.total || 0;
 
             const history = loadHistory();
             const idx = history.findIndex(t => t.id === id);
+            const failedFiles = folderReceiveFailedFiles.get(id) || [];
             if (idx !== -1) {
                 history[idx].status = (failed === 0 && received === total) ? 'success' : 'partial';
                 history[idx].filesReceived = received;
                 history[idx].filesFailed = failed;
+                history[idx].failedFiles = failedFiles;
                 history[idx].endTime = new Date().toISOString();
                 saveHistory(history);
             }
 
             io.emit('folder-progress', {
                 id,
+                direction: 'receive',
                 filesCompleted: received,
                 filesFailed: failed,
                 fileCount: total,
+                failedFiles,
                 status: (failed === 0 && received === total) ? 'completed' : 'partial'
             });
 
             folderReceiveState.delete(id);
             acceptedFolderSessions.delete(id);
+            folderReceiveFailedFiles.delete(id);
+            // Individual per-file-id entries in folderReceiveFileNames are
+            // small and self-limiting (one per file ever received), but
+            // clear the ones for this folder now rather than let them sit.
+            for (const key of folderReceiveFileNames.keys()) {
+                if (folderIdOf(key) === id) folderReceiveFileNames.delete(key);
+            }
 
         } else if (line.includes('INCOMING_REQUEST:')) {
 
@@ -251,10 +287,12 @@ coreEngine.stdout.on('data', (data) => {
                     // accepted as a whole — auto-accept it and don't
                     // surface a second prompt.
                     coreEngine.stdin.write(`REQUEST_ACCEPT:${id}\n`);
+                    folderReceiveFileNames.set(id, filename);
 
                     const folderState = folderReceiveState.get(parentFolderId);
                     io.emit('folder-progress', {
                         id: parentFolderId,
+                        direction: 'receive',
                         currentFile: filename,
                         filesCompleted: folderState ? folderState.filesCompleted : 0,
                         fileCount: folderState ? folderState.fileCount : null,
@@ -369,7 +407,13 @@ coreEngine.stdout.on('data', (data) => {
                 // A single file within a folder failed — surface it as a
                 // folder-scoped warning, don't fail the whole folder UI;
                 // FOLDER_TRANSFER_COMPLETE will report the true final count.
-                io.emit('folder-file-error', { folderId: parentFolderId, fileId: id, code, message });
+                const failedPath = folderReceiveFileNames.get(id) || id;
+                if (!folderReceiveFailedFiles.has(parentFolderId)) {
+                    folderReceiveFailedFiles.set(parentFolderId, []);
+                }
+                folderReceiveFailedFiles.get(parentFolderId).push({ path: failedPath, code });
+
+                io.emit('folder-file-error', { folderId: parentFolderId, fileId: id, path: failedPath, code, message });
                 return;
             }
 
@@ -385,10 +429,10 @@ coreEngine.stdout.on('data', (data) => {
                 }
             }
 
-        } else if (line.trim().length > 0) {
-            console.log(`⚙️ [C++] ${line.trim()}`);
+        } else if (line.length > 0) {
+            console.log(`⚙️ [C++] ${line}`);
         }
-    });
+    }
 });
 coreEngine.on('error', (err) => {
     console.error(
@@ -482,11 +526,11 @@ app.post('/send', upload.single('file'), (req, res) => {
         activeTransfers.delete(transferId);
     });
 
-    sender.stdout.on("data", (data) => {
-        const output = data.toString();
-        const lines = output.split('\n');
+    onCompleteLines(sender.stdout, (rawLine) => {
+        const line = rawLine.trim();
+        if (line.length === 0) return;
 
-        lines.forEach(line => {
+        {
             if (line.startsWith('SENDER_PROGRESS:')) {
                 const parts = line.substring(16).split('|');
                 if (parts.length === 3) {
@@ -519,10 +563,10 @@ app.post('/send', upload.single('file'), (req, res) => {
                         saveHistory(h);
                     }
                 }
-            } else if (line.trim().length > 0) {
-                console.log(`📤 [SENDER ${transferId}]: ${line.trim()}`);
+            } else if (line.length > 0) {
+                console.log(`📤 [SENDER ${transferId}]: ${line}`);
             }
-        });
+        }
     });
 
     sender.stderr.on("data", (data) => {
@@ -603,10 +647,11 @@ app.post('/send-folder', assignFolderTempPath, uploadFolder.array('files'), (req
         activeTransfers.delete(transferId);
     });
 
-    sender.stdout.on("data", (data) => {
-        const lines = data.toString().split('\n');
+    onCompleteLines(sender.stdout, (rawLine) => {
+        const line = rawLine.trim();
+        if (line.length === 0) return;
 
-        lines.forEach(line => {
+        {
             if (line.startsWith('SENDER_PROGRESS:')) {
                 const parts = line.substring(16).split('|');
                 if (parts.length === 3) {
@@ -614,6 +659,8 @@ app.post('/send-folder', assignFolderTempPath, uploadFolder.array('files'), (req
                     const progress = Math.round((parseInt(current) / parseInt(total)) * 100);
                     io.emit('folder-progress', {
                         id: transferId,
+                        direction: 'send',
+                        currentFile: folderSendCurrentFile.get(transferId),
                         fileProgress: progress,
                         status: 'sending'
                     });
@@ -622,8 +669,10 @@ app.post('/send-folder', assignFolderTempPath, uploadFolder.array('files'), (req
                 // "📄 (2/4) photos/img2.png" — surfaces which file is currently sending
                 const match = line.match(/\((\d+)\/(\d+)\)\s+(.+)/);
                 if (match) {
+                    folderSendCurrentFile.set(transferId, match[3]);
                     io.emit('folder-progress', {
                         id: transferId,
+                        direction: 'send',
                         currentFile: match[3],
                         filesCompleted: parseInt(match[1]) - 1,
                         fileCount: parseInt(match[2]),
@@ -632,25 +681,35 @@ app.post('/send-folder', assignFolderTempPath, uploadFolder.array('files'), (req
                 }
             } else if (line.startsWith('FOLDER_SEND_COMPLETE:')) {
                 const payload = line.split('FOLDER_SEND_COMPLETE:')[1].trim();
-                const [id, sentPart, failedPart, totalPart] = payload.split('|');
-                const sent = parseInt(sentPart.split('=')[1]);
-                const failed = parseInt(failedPart.split('=')[1]);
-                const total = parseInt(totalPart.split('=')[1]);
+                const { id, fields } = parseIdAndFields(payload);
+                const sent = fields.sent || 0;
+                const failed = fields.failed || 0;
+                const total = fields.total || 0;
+                const failedFiles = folderSendFailedFiles.get(id) || [];
 
                 const h = loadHistory();
                 const idx = h.findIndex(t => t.id === id);
                 if (idx !== -1) {
                     h[idx].status = failed === 0 ? 'success' : 'partial';
+                    h[idx].filesSent = sent;
+                    h[idx].filesFailed = failed;
+                    h[idx].failedFiles = failedFiles;
                     h[idx].endTime = new Date().toISOString();
                     saveHistory(h);
                 }
 
                 io.emit('folder-progress', {
                     id,
+                    direction: 'send',
                     filesCompleted: sent,
+                    filesFailed: failed,
                     fileCount: total,
+                    failedFiles,
                     status: failed === 0 ? 'completed' : 'partial'
                 });
+
+                folderSendCurrentFile.delete(id);
+                folderSendFailedFiles.delete(id);
             } else if (line.startsWith('ERROR:')) {
                 const rawError = line.substring(6).trim();
                 const [code, id] = rawError.split('|');
@@ -666,11 +725,22 @@ app.post('/send-folder', assignFolderTempPath, uploadFolder.array('files'), (req
                 };
                 const message = errorMessages[code] || 'An unknown error occurred.';
                 console.log(`❌ Sender (folder) Error [ID: ${id || 'System'}]: ${code}`);
-                io.emit('folder-file-error', { folderId: transferId, fileId: id, code, message });
-            } else if (line.trim().length > 0) {
-                console.log(`📤 [SENDER(folder) ${transferId}]: ${line.trim()}`);
+
+                // Per-file errors inside a folder send arrive with an id like
+                // "<transferId>_<index>" — the file this refers to is
+                // whichever one the most recent "📄" line named, since
+                // sending is strictly sequential (one file at a time).
+                const failedPath = folderSendCurrentFile.get(transferId) || id;
+                if (!folderSendFailedFiles.has(transferId)) {
+                    folderSendFailedFiles.set(transferId, []);
+                }
+                folderSendFailedFiles.get(transferId).push({ path: failedPath, code });
+
+                io.emit('folder-file-error', { folderId: transferId, fileId: id, path: failedPath, code, message });
+            } else if (line.length > 0) {
+                console.log(`📤 [SENDER(folder) ${transferId}]: ${line}`);
             }
-        });
+        }
     });
 
     sender.stderr.on("data", (data) => {
