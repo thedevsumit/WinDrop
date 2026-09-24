@@ -117,8 +117,8 @@ For a folder transfer, step 5 repeats per manifest entry over the same connectio
 
 256 KB chunks, `TCP_NODELAY`, and 1 MB socket buffers keep a single TCP connection close to link-saturated.
 
-- **Real-world:** a 2.3 GB file transferred between two Linux laptops on shared, congested campus WiFi (not a clean lab LAN) in 6 min 13 sec — ~6.2 MB/s sustained.
-- **Controlled benchmark:** 9.17 MB/s average (9.84 MB/s peak) on 250 MB payloads, across 9 trials over 3 runs on real campus WiFi. Full trial-by-trial breakdown and methodology in `BENCHMARKS.md`, produced with the built-in `--benchmark-auto-accept` / `BENCHMARK:` tooling.
+- **Real-world:** a 2.3 GB file transferred between two Linux laptops on a personal Jio router in 1 min 15 sec — ~31.4 MB/s sustained.
+- **Controlled benchmark:** 37.98 MB/s average (38.59 MB/s peak) on 250 MB payloads, across 9 trials over 3 runs on a personal Jio router. Full trial-by-trial breakdown and methodology in `BENCHMARKS.md`, produced with the built-in `--benchmark-auto-accept` / `BENCHMARK:` tooling.
 
 These numbers are WiFi-bound, not link-bound — expect higher throughput on a wired LAN. Folder transfers currently send files sequentially over one connection rather than in parallel (see Roadmap).
 
